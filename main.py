@@ -2034,7 +2034,7 @@ def main():
             except: pass
 
         ss_bbcode = "\n".join([f"[img]{u}[/img]" for u in uploaded_direct_urls])
-        description = f"[center][b][size=5][color=#59E817][font=Oswald]MediaInfo[/color][/size][/b][/center][b][/color][/font][mediainfo]\n{mediainfo_text}[/mediainfo]\n[center][/b][b][size=5][color=#59E817]][font=Oswald]Screenshots[/color][/size][/b][/center]\n[center]\n{ss_bbcode}[/center][/font]"
+        description = f"[center][b][size=5][color=#59E817][font=Oswald]MediaInfo[/color][/size][/b][/center][b][/font][mediainfo]\n{mediainfo_text}[/mediainfo]\n[center][/b][b][size=5][color=#59E817][font=Oswald]Screenshots[/color][/size][/b][/center]\n[center]\n{ss_bbcode}[/center][/font]"
 
         if not SKIP_TXT:
             save_name = f"{target_path.name}_description.txt" if is_folder else f"{target_path.stem}_TBD_Description.txt"
