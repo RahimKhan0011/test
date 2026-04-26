@@ -70,7 +70,7 @@ AUTO_DELETE_CREATED_FILES = True
 
 # --- SERVER SETTINGS ---
 START_HTTP_SERVER = True               # True = Start local server for Tampermonkey sync
-HTTP_PORT = 40471                      # Port for the local server
+HTTP_PORT = 40471                      # Port for the web app (UI + API endpoints)
 # ================================================================
 
 VIDEO_EXTS = {'.mkv', '.mp4', '.avi', '.mov', '.m4v', '.webm', '.flv', '.wmv', '.mpg', '.mpeg', '.ts', '.m2ts'}
@@ -125,7 +125,11 @@ class c:
     WHITE   = '\033[97m'
 
 def search_imdb(title: str) -> str | None:
-    """Search IMDb for a title and return the URL of the first matching title result."""
+    """Search IMDb for a title and return the URL of the first matching title result.
+
+    Strips common technical release tags (resolution, codec, source, etc.) from
+    the title before searching so that results are more accurate.
+    """
     clean = re.sub(
         r'\b(2160p|1080p|720p|480p|4K|UHD|SDR|HDR10?\+?|HLG|DV|DOVI|'
         r'BluRay|BDRip|BRRip|WEB-DL|WEBRip|HDTC|HDCAM|HDTS|DVDRip|CAM|'
@@ -134,8 +138,10 @@ def search_imdb(title: str) -> str | None:
         r'AMZN|NF|DSNP|HMAX|PCOK|SHO|PMTP|ATVP)\b',
         '', title, flags=re.I
     )
-    clean = re.sub(r'\[.*?\]', '', clean)
-    clean = re.sub(r'\s*-\s*\S+\s*$', '', clean)
+    # Use [^\]]* instead of .*? to avoid catastrophic backtracking on bracket content.
+    clean = re.sub(r'\[[^\]]*\]', '', clean)
+    # Use explicit space/tab classes to avoid overlap with \s that can cause ReDoS.
+    clean = re.sub(r'[ \t]*-[ \t]*\S+[ \t]*$', '', clean)
     clean = re.sub(r'[._]+', ' ', clean)
     clean = re.sub(r'\s+', ' ', clean).strip(' .-')
     if not clean:
@@ -154,8 +160,8 @@ def search_imdb(title: str) -> str | None:
             m = re.search(r'href="/title/(tt\d+)/', resp.text)
             if m:
                 return f"https://www.imdb.com/title/{m.group(1)}/"
-    except Exception:
-        pass
+    except Exception as exc:
+        error(f"IMDb search failed for '{clean}': {exc}")
     return None
 
 _WEBAPP_HTML = """<!DOCTYPE html>
@@ -368,7 +374,7 @@ class WebAppHandler(BaseHTTPRequestHandler):
     def _send_headers(self, content_type: str, length: int | None = None):
         self.send_response(200)
         self.send_header('Content-Type', content_type)
-        self.send_header('Cache-Control', 'no-store, no-cache')
+        self.send_header('Cache-Control', 'no-store, no-cache, must-revalidate')
         self.send_header('Access-Control-Allow-Origin', '*')
         if length is not None:
             self.send_header('Content-Length', str(length))
@@ -416,6 +422,11 @@ class WebAppHandler(BaseHTTPRequestHandler):
         return
 
 def start_server_thread(port: int):
+    """Start the web app server in a background daemon thread.
+
+    The server listens on *port* and serves the upload assistant web app at ``/``
+    together with API endpoints (``/api/data``, ``/api/torrent``, ``/api/imdb``).
+    """
     def run():
         try:
             httpd = HTTPServer(('', port), WebAppHandler)
