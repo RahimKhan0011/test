@@ -2034,7 +2034,7 @@ def main():
             except: pass
 
         ss_bbcode = "\n".join([f"[img]{u}[/img]" for u in uploaded_direct_urls])
-        description = f"[center][b][size=5][color=#59E817][font=Segoe UI]MediaInfo[/font][/color][/size][/b][/center][font=Courier New][mediainfo]\n{mediainfo_text}\n[/mediainfo]\n[/font]\n[center][b][size=5][font=Tahoma][color=#59E817]Screenshots[/color][/size][/b]\n[size=2][color=#cddc39]Straight from the source.[/color][/size][/center][/font]\n[center]\n{ss_bbcode}[/center][i][b][center][font=Segoe UI][size=4][color=#FFD700][hr]If you're downloading my torrent and not getting the desired speed, just comment, and I'll move it to my seedbox.[/color][/size][/font][/center][/b][/i]"
+        description = f"[center][b][size=5][color=#59E817][font=Oswald]MediaInfo[/font][/color][/size][/b][/center][font=Courier New][mediainfo]\n{mediainfo_text}\n[/mediainfo]\n[/font]\n[center][b][size=5][color=#59E817]Screenshots[/color][/size][/b][/center][/font]\n[center]\n{ss_bbcode}[/center]"
 
         if not SKIP_TXT:
             save_name = f"{target_path.name}_description.txt" if is_folder else f"{target_path.stem}_TBD_Description.txt"
