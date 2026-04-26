@@ -1732,7 +1732,11 @@ def main():
     INDEX_HTML = sync_dir / "index.html"
 
     if LATEST_JSON.exists(): LATEST_JSON.unlink()
-    INDEX_HTML.write_text(_WEBAPP_HTML, encoding='utf-8')
+    if INDEX_HTML.exists(): INDEX_HTML.unlink()
+    try:
+        INDEX_HTML.write_text(_WEBAPP_HTML, encoding='utf-8')
+    except OSError as exc:
+        error(f"Could not write temporary index.html: {exc}")
 
     clear(); banner()
     print(f"{c.BOLD}{c.PURPLE}Selected → {target_path.name}{c.RESET} {'(Folder Mode)' if is_folder else ''}\n")
