@@ -1,3 +1,5 @@
+
+//Don't edit this file, take its imdb search integration and implement in the main.py, this is just for reference
 // ==UserScript==
 // @name         TBD lazy upload
 // @namespace    http://tampermonkey.net/
