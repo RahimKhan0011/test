@@ -99,10 +99,11 @@ _REENCODE_RE = re.compile(
 )
 
 # Allow optional extra bracketed tags (e.g., [MultiSub]) after resolution but leave CRC-like hashes (8+ hex) for the trailing optional group
+# Episode may be a bare number (e.g., 22) or an E-prefixed number (e.g., E22, E0022) but NOT an SxxExx token.
 _FANSUB_RE = re.compile(
     r'\[([^\]]+)\]\s*'
     r'(.+?)\s+-\s+'
-    r'(\d+(?:\.\d+)?)\s*'
+    r'(E?\d+(?:\.\d+)?)\s*'
     r'(?:v\d+\s*)?'
     r'(?:[\(\[](\d+p)(?:[^\)\]]*)?[\)\]])?\s*'
     r'(?:\[(?![A-Fa-f0-9]{8,}\])[^\]]+\]\s*)*'
@@ -997,6 +998,23 @@ def build_name(path):
             parts.append(detected_webtype)
         effective_web = detected_webtype
 
+    # When the original filename contains both a standalone HEVC format marker
+    # and an x265 encoder tag, this is a WEBRip re-encode.  Override effective_web
+    # so that downstream codec normalisation uses encoder names (x265), and replace
+    # any WEB-DL entry already added to parts with WEBRip.
+    hevc_and_x265_in_filename = (
+        hevc_format_match
+        and video_from_filename
+        and video
+        and video.upper() == "X265"
+    )
+    if hevc_and_x265_in_filename and effective_web != "WEBRip" and not explicit_non_web_source:
+        if "WEB-DL" in parts:
+            parts[parts.index("WEB-DL")] = "WEBRip"
+        elif effective_web is None:
+            parts.append("WEBRip")
+        effective_web = "WEBRip"
+
     # Ensure REMUX tag is retained (after source tags for correct ordering)
     if has_remux and "REMUX" not in parts:
         parts.append("REMUX")
@@ -1014,6 +1032,9 @@ def build_name(path):
             video = "H.264"
         elif upper_video == "H265":
             video = "H.265"
+        # When filename has HEVC alongside x265 and source is WEBRip, keep x265.
+        elif upper_video in ("HEVC",) and effective_web == "WEBRip":
+            video = "x265"
     else:
         lower_encoding = encoding_text.lower() if encoding_text else ""
         if re.search(r"\bx265\b", lower_encoding):
@@ -1046,8 +1067,12 @@ def build_name(path):
         parts.append(video)
     # Preserve an explicit HEVC codec format tag when it appears alongside an encoder tag
     # (x265 or x264); many groups annotate both (e.g., "x265.HEVC-GROUP").
+    # Exception: for WEBRip at 1080p/720p the re-encode is clear from context –
+    # x265 alone is sufficient and appending HEVC would be redundant/incorrect.
     if hevc_format_match and video and video.upper() in ("X265", "X264"):
-        parts.append("HEVC")
+        is_webrip_standard_res = effective_web == "WEBRip" and res in ("1080p", "720p")
+        if not is_webrip_standard_res:
+            parts.append("HEVC")
 
     final = ".".join(p for p in parts if p)
     final = clean_name(final)
@@ -1145,18 +1170,25 @@ def build_title(new_name):
 def detect_fansub(name):
     """Detect fansub-style filename and return parsed info dict, or ``None``.
 
-    Handles formats like ``[SubsPlease] Title - 22 (1080p) [817B9AE4].mkv``.
+    Handles formats like ``[SubsPlease] Title - 22 (1080p) [817B9AE4].mkv``
+    and ``[SubsPlease] Title - E22 (1080p) [817B9AE4].mkv``.
     """
     base = os.path.splitext(name)[0]
     m = _FANSUB_RE.match(base)
     if not m:
         return None
+    raw_ep = m.group(3).strip()
+    is_e_prefixed = raw_ep.upper().startswith("E")
+    ep_num = int(float(raw_ep.lstrip("Ee")))
     return {
         "group": m.group(1).strip(),
         "title": m.group(2).strip(),
-
-        "episode": int(float(m.group(3).strip())),
+        "episode": ep_num,
         "resolution": m.group(4),
+        # When the episode token is E-prefixed (e.g., E22 or E0001), preserve the
+        # original string so the title can be formatted as "EXX" without a season prefix.
+        "is_e_prefixed": is_e_prefixed,
+        "ep_str": raw_ep if is_e_prefixed else None,
     }
 
 def anime_season_episode(title, absolute_episode):
@@ -1200,6 +1232,8 @@ def _build_fansub_title(path, fansub_info, is_pack=False):
     title = fansub_info["title"]
     absolute_ep = fansub_info["episode"]
     fn_res = fansub_info["resolution"]
+    is_e_prefixed = fansub_info.get("is_e_prefixed", False)
+    ep_str = fansub_info.get("ep_str") or ""
 
     title_for_api = title
     season_suffix = None
@@ -1239,11 +1273,20 @@ def _build_fansub_title(path, fansub_info, is_pack=False):
                     season_suffix = value
                     title_for_api = prefix
 
-    season, episode = anime_season_episode(title_for_api, absolute_ep)
-    if season_suffix is not None:
-        season = season_suffix
-    season = season or 1
-    episode = episode or absolute_ep
+    # When the episode token is E-prefixed (e.g., E22, E0001) and no season
+    # designator is present in the title, skip the season/episode API lookup
+    # and keep the original E-episode string (e.g., "E22") without adding SXX.
+    use_e_prefix_format = is_e_prefixed and season_suffix is None
+
+    if not use_e_prefix_format:
+        season, episode = anime_season_episode(title_for_api, absolute_ep)
+        if season_suffix is not None:
+            season = season_suffix
+        season = season or 1
+        episode = episode or absolute_ep
+    else:
+        season = 1
+        episode = absolute_ep
 
     english_title = anime_english_title(title_for_api)
     if english_title and english_title.lower() != title_for_api.lower():
@@ -1289,12 +1332,21 @@ def _build_fansub_title(path, fansub_info, is_pack=False):
     else:
         vc = _normalize_video_codec(vc, web_tag)
 
-    ep_title = episode_title(title_for_api, f"{season:02d}", f"{episode:02d}") if not is_pack else None
-
-    if is_pack:
-        parts = [title_display, f"S{season:02d}"]
+    if use_e_prefix_format:
+        # E-prefixed episode: format as "Title E22" (no season prefix)
+        ep_label = ep_str.upper()
+        ep_title = episode_title(title_for_api, "1", f"{absolute_ep:02d}") if not is_pack else None
+        if is_pack:
+            parts = [title_display]
+        else:
+            parts = [title_display, ep_label]
     else:
-        parts = [title_display, f"S{season:02d}E{episode:02d}"]
+        ep_title = episode_title(title_for_api, f"{season:02d}", f"{episode:02d}") if not is_pack else None
+        if is_pack:
+            parts = [title_display, f"S{season:02d}"]
+        else:
+            parts = [title_display, f"S{season:02d}E{episode:02d}"]
+
     if ep_title:
         parts.append(ep_title)
     if res:

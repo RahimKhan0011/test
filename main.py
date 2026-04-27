@@ -110,6 +110,7 @@ GENERATED_TORRENT = None
 GENERATED_TXT = None
 GENERATED_SPECTROGRAM = None
 EXTRACTED_COVER = None
+COVER_PATH: Path | None = None
 GENERATED_PDF_IMAGES: list[Path] = []
 INDEX_HTML = None
 
@@ -130,6 +131,8 @@ def search_imdb(title: str) -> str | None:
 
     Strips common technical release tags (resolution, codec, source, etc.) from
     the title before searching so that results are more accurate.
+    Uses the IMDb suggestion API (same endpoint as the Tampermonkey UI) and falls
+    back to HTML scraping when the suggestion API is unavailable.
     """
     clean = re.sub(
         r'\b(2160p|1080p|720p|480p|4K|UHD|SDR|HDR10?\+?|HLG|DV|DOVI|'
@@ -147,14 +150,31 @@ def search_imdb(title: str) -> str | None:
     clean = re.sub(r'\s+', ' ', clean).strip(' .-')
     if not clean:
         return None
+    _headers = {
+        "User-Agent": "Mozilla/5.0 (X11; Linux x86_64; rv:109.0) Gecko/20100101 Firefox/115.0",
+        "Accept": "application/json",
+        "Accept-Language": "en-US,en;q=0.9",
+    }
+    # Primary: IMDb suggestion API (fast, JSON, no scraping required)
+    try:
+        first_char = clean[0].lower()
+        resp = requests.get(
+            f"https://v3.sg.media-imdb.com/suggestion/{first_char}/{quote(clean)}.json",
+            headers=_headers,
+            timeout=10,
+        )
+        if resp.status_code == 200:
+            data = resp.json()
+            items = data.get('d') or []
+            if items and items[0].get('id'):
+                return f"https://www.imdb.com/title/{items[0]['id']}/"
+    except Exception as exc:
+        error(f"IMDb suggestion API failed for '{clean}': {exc}")
+    # Fallback: HTML scraping
     try:
         resp = requests.get(
             f"https://www.imdb.com/find/?q={quote(clean)}&s=tt",
-            headers={
-                "User-Agent": "Mozilla/5.0 (X11; Linux x86_64; rv:109.0) Gecko/20100101 Firefox/115.0",
-                "Accept": "text/html,application/xhtml+xml",
-                "Accept-Language": "en-US,en;q=0.9",
-            },
+            headers={**_headers, "Accept": "text/html,application/xhtml+xml"},
             timeout=15,
         )
         if resp.status_code == 200:
@@ -162,7 +182,7 @@ def search_imdb(title: str) -> str | None:
             if m:
                 return f"https://www.imdb.com/title/{m.group(1)}/"
     except Exception as exc:
-        error(f"IMDb search failed for '{clean}': {exc}")
+        error(f"IMDb search fallback failed for '{clean}': {exc}")
     return None
 
 _WEBAPP_HTML = """<!DOCTYPE html>
@@ -179,7 +199,7 @@ body{background:var(--bg);color:var(--text);font-family:'Segoe UI',system-ui,-ap
   min-height:100vh;padding:16px;max-width:860px;margin:0 auto}
 header{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;
   padding-bottom:16px;border-bottom:1px solid var(--border);margin-bottom:20px}
-.logo{font-size:1rem;font-weight:700;color:var(--yellow);letter-spacing:.3px}
+.logo{font-size:1rem;font-weight:700;color:var(--yellow);letter-spacing:.3px;flex:1;text-align:center}
 .badges{display:flex;gap:6px;flex-wrap:wrap}
 .badge{padding:3px 9px;border-radius:20px;font-size:.7rem;font-weight:600;letter-spacing:.4px}
 .cat{background:#1a1a30;color:#9090e0;border:1px solid #2a2a60}
@@ -225,8 +245,9 @@ button.dl{border-color:#4a8fc0;color:#80b8e0;background:#0a1828}
 <div id="loading"><div class="spin"></div><span>Waiting for data\u2026</span></div>
 <div id="app" style="display:none">
   <header>
+    <div style="flex:1"></div>
     <span class="logo">\u26a1 TorrentBD Lazy Upload</span>
-    <div class="badges">
+    <div class="badges" style="flex:1;justify-content:flex-end;display:flex;gap:6px;flex-wrap:wrap">
       <span class="badge cat" id="cat-badge"></span>
       <span class="badge lang" id="lang-badge"></span>
     </div>
@@ -366,6 +387,8 @@ class WebAppHandler(BaseHTTPRequestHandler):
             self._serve_data()
         elif route == '/api/torrent':
             self._serve_torrent()
+        elif route == '/api/cover':
+            self._serve_cover()
         elif route == '/api/imdb':
             self._serve_imdb(qs)
         else:
@@ -411,6 +434,22 @@ class WebAppHandler(BaseHTTPRequestHandler):
             self.send_response(404)
             self.end_headers()
 
+    def _serve_cover(self):
+        cover = COVER_PATH
+        if cover and cover.exists():
+            ext = cover.suffix.lower()
+            content_type = 'image/png' if ext == '.png' else 'image/jpeg'
+            body = cover.read_bytes()
+            self.send_response(200)
+            self.send_header('Content-Type', content_type)
+            self.send_header('Content-Length', str(len(body)))
+            self.send_header('Cache-Control', 'no-store')
+            self.end_headers()
+            self.wfile.write(body)
+        else:
+            self.send_response(404)
+            self.end_headers()
+
     def _serve_imdb(self, query_string: str):
         params = parse_qs(query_string)
         title = params.get('q', [''])[0]
@@ -422,12 +461,42 @@ class WebAppHandler(BaseHTTPRequestHandler):
     def log_message(self, format, *args):
         return
 
+def _kill_port_if_busy(port: int) -> None:
+    """Kill any process occupying *port* so the server can bind to it.
+
+    Uses ``fuser -k {port}/tcp`` on Linux/macOS.  Silently ignores errors on
+    platforms where ``fuser`` is unavailable (e.g., Windows).
+    """
+    import socket as _socket
+    try:
+        with _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM) as s:
+            s.settimeout(0.3)
+            if s.connect_ex(('127.0.0.1', port)) != 0:
+                return  # Port is free
+    except OSError:
+        return
+    # Port is in use – attempt to free it
+    try:
+        subprocess.run(
+            ["fuser", "-k", f"{port}/tcp"],
+            capture_output=True, check=False, timeout=5,
+        )
+        import time as _time
+        _time.sleep(0.4)
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        pass
+
+
 def start_server_thread(port: int):
     """Start the web app server in a background daemon thread.
 
     The server listens on *port* and serves the upload assistant web app at ``/``
-    together with API endpoints (``/api/data``, ``/api/torrent``, ``/api/imdb``).
+    together with API endpoints (``/api/data``, ``/api/torrent``, ``/api/imdb``,
+    ``/api/cover``).  If the port is already occupied it is freed with
+    ``fuser -k`` before binding.
     """
+    _kill_port_if_busy(port)
+
     def run():
         try:
             httpd = HTTPServer(('', port), WebAppHandler)
@@ -522,12 +591,51 @@ def create_torrent(target: Path) -> bool:
         error("mkbrr not found! → https://github.com/autobrr/mkbrr")
         return False
 
+    # ── Build exclusion patterns ──────────────────────────────────────────────
+    exclude_patterns: list[str] = []
+    if target.is_dir():
+        # Always exclude metadata/info sidecar files
+        exclude_patterns.extend(["*.nfo", "*.txt"])
+
+        # Exclude screens/screen/proof directories and files recursively
+        _exclude_dir_names = {"screens", "screen", "proof", "screenshots", "screenshot"}
+        for item in target.rglob("*"):
+            lower_name = item.name.lower()
+            stem_lower = item.stem.lower()
+            try:
+                rel = item.relative_to(target).as_posix()
+            except ValueError:
+                continue
+            if item.is_dir() and lower_name in _exclude_dir_names:
+                pattern = f"{rel}/**"
+                if pattern not in exclude_patterns:
+                    exclude_patterns.append(pattern)
+            elif item.is_file() and stem_lower in _exclude_dir_names:
+                if rel not in exclude_patterns:
+                    exclude_patterns.append(rel)
+
+        # Prompt user about .srt subtitle files
+        srt_files = [f for f in target.rglob("*.srt")]
+        if srt_files:
+            log(f"Found {len(srt_files)} .srt subtitle file(s) in folder.", "SRT", c.YELLOW)
+            for sf in srt_files[:3]:
+                print(f"   {c.DIM}{sf.name}{c.RESET}")
+            if len(srt_files) > 3:
+                print(f"   {c.DIM}...and {len(srt_files) - 3} more{c.RESET}")
+            ans = input(f"\n{c.BOLD}Include .srt files in torrent? [y/N]: {c.RESET}").strip().lower()
+            if ans != 'y':
+                exclude_patterns.append("*.srt")
+                log("Excluding .srt files from torrent.", "SRT")
+
     log("Creating torrent file...", "Torrent")
     out = target.parent / f"{target.name}.torrent"
     GENERATED_TORRENT = out
 
     cmd = ["mkbrr", "create", "-t", TRACKER_ANNOUNCE,
            f"--private={'true' if PRIVATE_TORRENT else 'false'}", "-o", str(out), str(target)]
+
+    for pattern in exclude_patterns:
+        cmd.extend(["--exclude", pattern])
 
     process = subprocess.Popen(
         cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
@@ -1722,7 +1830,7 @@ def format_title_for_metadata(target_path: Path, is_folder: bool, video_path: Pa
 
 def main():
 
-    global LATEST_JSON, GENERATED_TXT, EXTRACTED_COVER, INDEX_HTML
+    global LATEST_JSON, GENERATED_TXT, EXTRACTED_COVER, INDEX_HTML, COVER_PATH
 
     target_path, is_folder = select_target()
     if not target_path or not target_path.exists(): return
@@ -1731,8 +1839,20 @@ def main():
     LATEST_JSON = sync_dir / "latest.json"
     INDEX_HTML = sync_dir / "index.html"
 
-    if LATEST_JSON.exists(): LATEST_JSON.unlink()
-    if INDEX_HTML.exists(): INDEX_HTML.unlink()
+    # Clean up stale temp files from any previous run before starting.
+    _stale_cleanup = [
+        LATEST_JSON,
+        INDEX_HTML,
+        target_path.parent / f"{target_path.name}.torrent",
+    ]
+    for _stale in _stale_cleanup:
+        if _stale.exists():
+            try:
+                _stale.unlink()
+                log(f"Removed stale file: {_stale.name}", "Cleanup", c.YELLOW)
+            except OSError:
+                pass
+
     try:
         INDEX_HTML.write_text(_WEBAPP_HTML, encoding='utf-8')
     except OSError as exc:
@@ -1842,6 +1962,7 @@ def main():
                     log("No cover found (folder or embedded)", "Cover")
 
         if local_cover_path:
+            COVER_PATH = local_cover_path
             log("Uploading cover image...", "Upload")
             uploaded_cover_url = upload_image(local_cover_path)
             if uploaded_cover_url:
@@ -1933,6 +2054,8 @@ def main():
                     extracted_images[0] = staged_cover_path
                 except OSError as exc:
                     error(f"Failed to stage PDF cover image from {cover_local_path} to {staged_cover_path}: {exc}")
+
+            COVER_PATH = cover_local_path
 
             log("Uploading extracted pages...", "Upload")
             total_pages = len(extracted_images)
