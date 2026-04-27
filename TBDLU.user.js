@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TBD lazy upload
 // @namespace    http://tampermonkey.net/
-// @version      2.0  // AI: increment this version number every time you edit this file
+// @version      2.1  // AI: increment this version number every time you edit this file
 // @description  Title + Category + Audio + IMDB
 // @author       fahimbyte
 // @match        https://www.torrentbd.net/torrents-upload.php*
@@ -25,7 +25,7 @@
 
 
     const SERVERS = {
-        "Localhost": "http://localhost:8090",
+        "Localhost": "http://localhost:40452",
 
     };
 
@@ -691,7 +691,7 @@
 
         Object.entries(SERVERS).forEach(([name, url]) => {
             GM_xmlhttpRequest({
-                method: "GET", url: `${url}/latest.json?t=${Date.now()}`, timeout: 2000,
+                method: "GET", url: `${url}/api/data?t=${Date.now()}`, timeout: 2000,
                 onload: (res) => {
                     if (res.status === 200) {
                         updateStatus(name, true);
@@ -719,16 +719,15 @@
         fillForm(data);
 
         if (settings.autoCover && data.coverFile) {
-            const coverFilePath = data.coverFile.split(/[/\\]/).map(segment => encodeURIComponent(segment)).join('/');
             GM_xmlhttpRequest({
-                method: "GET", url: `${baseUrl}/${coverFilePath}?t=${Date.now()}`, responseType: 'blob',
+                method: "GET", url: `${baseUrl}/api/cover?t=${Date.now()}`, responseType: 'blob',
                 onload: (r) => { if (r.status === 200 && r.response && r.response.size > 0) handleImageBlob(r.response); },
                 onerror: () => {}
             });
         }
 
         const torrentFileName = data.torrentFile || "latest.torrent";
-        const downloadUrl = `${baseUrl}/${encodeURIComponent(torrentFileName)}?t=${Date.now()}`;
+        const downloadUrl = `${baseUrl}/api/torrent?t=${Date.now()}`;
 
         GM_xmlhttpRequest({
             method: "GET", url: downloadUrl, responseType: 'blob',
