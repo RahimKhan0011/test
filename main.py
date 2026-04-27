@@ -197,8 +197,10 @@ _IMDB_CLEAN_RE = re.compile(
 def _clean_title_for_imdb(title: str) -> str:
     """Strip technical release tags from *title* to produce a clean IMDb search query."""
     clean = _IMDB_CLEAN_RE.sub('', title)
-    clean = re.sub(r'\[[^\]]*\]', '', clean)
-    clean = re.sub(r'[ \t]*-[ \t]*\S+[ \t]*$', '', clean)
+    # Limit bracket content length to avoid slow backtracking on malformed input.
+    clean = re.sub(r'\[[^\]]{0,300}\]', '', clean)
+    # Require at least one non-space before the dash to avoid over-stripping.
+    clean = re.sub(r'(?<=\S)[ \t]+-[ \t]+\S+[ \t]*$', '', clean)
     clean = re.sub(r'[._]+', ' ', clean)
     return re.sub(r'\s+', ' ', clean).strip(' .-')
 
@@ -239,7 +241,7 @@ def search_imdb_multi(title: str) -> list[dict]:
                 results.append({
                     'id': item['id'],
                     'title': item.get('l', ''),
-                    'year': item.get('y'),
+                    'year': item.get('y') or '',
                     'type': item.get('q', ''),
                     'poster': poster,
                 })
@@ -452,9 +454,14 @@ async function doImdbSearch(q){
     }
     j.results.forEach(item=>{
       const div=document.createElement('div');div.className='imdb-item';
-      const img=item.poster?`<img src="${item.poster}" onerror="this.style.visibility='hidden'">`
-        :'<img style="visibility:hidden">';
-      div.innerHTML=img+`<div class="iinfo"><b>${item.title||''}</b><small>${item.year||''}\u00b7${item.type||''}</small></div>`;
+      const imgEl=document.createElement('img');
+      if(item.poster){imgEl.src=item.poster;imgEl.onerror=function(){this.style.visibility='hidden';};}
+      else{imgEl.style.visibility='hidden';}
+      const info=document.createElement('div');info.className='iinfo';
+      const b=document.createElement('b');b.textContent=item.title||'';
+      const sm=document.createElement('small');sm.textContent=(item.year||'')+'\u00b7'+(item.type||'');
+      info.appendChild(b);info.appendChild(sm);
+      div.appendChild(imgEl);div.appendChild(info);
       div.onclick=()=>selectImdbResult(item);
       res.appendChild(div);
     });
@@ -742,7 +749,7 @@ def create_torrent(target: Path) -> bool:
                 pattern = f"{rel}/**"
                 if pattern not in exclude_patterns:
                     exclude_patterns.append(pattern)
-            elif item.is_file() and ("sample" in stem_lower or stem_lower in _exclude_dir_names):
+            elif item.is_file() and (bool(re.search(r'(?:^|[^a-zA-Z])sample(?:[^a-zA-Z]|$)', stem_lower)) or stem_lower in _exclude_dir_names):
                 if rel not in exclude_patterns:
                     exclude_patterns.append(rel)
 
