@@ -44,12 +44,13 @@ SOURCE_MAP = {
     "channel4": "ALL4",
     "warhammertv": "WTV",
     "JioHotstar" : "JHS",
-    "AppleTV" : "ATV" ,
+    "AppleTV" : "ATV",
+    "now": "NOW",
 }
 
 FILENAME_SERVICES = [
     "AMZN", "NF", "VIKI", "AHA", "SNXT", "KCW", "DSNP", "ATV" , "JHS" , "WTV", "HULU", "ATVP", "HMAX", "PCOK", "PMTP",
-    "STAN", "CRAV", "MUBI", "CC", "CR", "FUNI", "HTSR", "HS", "iP", "ALL4", "iT", "BBC",
+    "STAN", "CRAV", "MUBI", "CC", "CR", "FUNI", "HTSR", "HS", "iP", "ALL4", "iT", "BBC", "NOW",
 ]
 
 _SOURCE_PATTERNS = [
@@ -795,7 +796,7 @@ def _has_multiple_audio_languages(audio_languages: list[str]) -> bool:
     """
     return len(audio_languages) > 1
 
-def build_name(path):
+def build_name(path, is_season_pack=False):
     name = os.path.basename(path)
     base, ext = os.path.splitext(name)
     # Use case-insensitive comparison to handle uppercase extensions (e.g., ".MKV").
@@ -921,12 +922,15 @@ def build_name(path):
                     existing_title = clean_name(raw)
 
         parts.append(show)
-        parts.append(f"S{season}E{episode_num}")
-        title = episode_title(show, season, _ep_lookup)
-        if title:
-            parts.append(title)
-        elif existing_title:
-            parts.append(existing_title)
+        if is_season_pack:
+            parts.append(f"S{season}")
+        else:
+            parts.append(f"S{season}E{episode_num}")
+            title = episode_title(show, season, _ep_lookup)
+            if title:
+                parts.append(title)
+            elif existing_title:
+                parts.append(existing_title)
     else:
 
         year_match = re.search(r"(19|20)\d{2}", base)
@@ -1160,6 +1164,11 @@ def build_title(new_name):
         # base is still the full string here, so anchor the year to the pre-episode segment.
         base = re.sub(r"(?<![A-Za-z0-9])(19|20)\d{2}(?=[.\s_-]*S\d{2}E\d{2})", "", base, flags=re.I)
         base = re.sub(r"\.{2,}", ".", base).strip(".")
+    elif re.search(r"S\d{2}(?!E\d{2})", base, re.I):
+        base = _strip_parenthesized_year(base)
+        # Strip year before a season-only token (e.g., Show.2026.S01.1080p → Show.S01.1080p)
+        base = re.sub(r"(?<![A-Za-z0-9])(19|20)\d{2}(?=[.\s_-]*S\d{2}(?!E\d{2}))", "", base, flags=re.I)
+        base = re.sub(r"\.{2,}", ".", base).strip(".")
 
     base = base.replace('.', ' ')
     return base
@@ -1367,7 +1376,7 @@ def _build_fansub_title(path, fansub_info, is_pack=False):
     result += f" - {group}"
     return result
 
-def generate_title(path, is_pack=False):
+def generate_title(path, is_pack=False, is_season_pack=False):
     """Generate a human-readable title for any video file.
 
     Dispatch order:
@@ -1386,6 +1395,11 @@ def generate_title(path, is_pack=False):
 
     When *is_pack* is ``True`` (the file is part of a multi-episode pack),
     the per-episode subtitle is omitted from the result.
+
+    When *is_season_pack* is ``True``, the file is treated as a representative
+    episode from a season pack: MediaInfo is read from the file for accurate
+    audio/video tags, but the episode number and episode title are omitted so
+    the result is a season-level title (e.g. ``Show S01 1080p WEB-DL …``).
     """
     name = os.path.basename(path)
 
@@ -1401,5 +1415,5 @@ def generate_title(path, is_pack=False):
     if fansub:
         return _build_fansub_title(path, fansub, is_pack=is_pack)
 
-    new_name = build_name(path)
+    new_name = build_name(path, is_season_pack=is_season_pack)
     return build_title(new_name)

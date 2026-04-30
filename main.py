@@ -2074,7 +2074,7 @@ def format_title_for_metadata(target_path: Path, is_folder: bool, video_path: Pa
 
         if file_has_episode and not folder_has_episode and not torrent_has_episode:
             try:
-                return generate_title(str(target_path))
+                return generate_title(str(source_path), is_season_pack=True)
             except Exception:
                 return target_path.name.replace('.torrent', '')
 
