@@ -692,7 +692,7 @@ def _fetch_app_stats() -> None:
                 in_section = True
                 continue
             if in_section:
-                if line.startswith('***'):
+                if line.strip().startswith('***'):
                     break
                 parts = line.split()
                 if len(parts) >= 3:
@@ -756,10 +756,14 @@ def _update_sysinfo_loop() -> None:
             pass
 
 
+_server_ready_event = threading.Event()
+
+
 def start_server_thread(port: int):
     global _http_server_started
     with _http_server_lock:
         if _http_server_started:
+            _server_ready_event.set()
             return
         _http_server_started = True
 
@@ -773,6 +777,7 @@ def start_server_thread(port: int):
             try:
                 httpd = HTTPServer(('', port), WebAppHandler)
                 _lp.log(f"{c.GREEN}⚡ Web App running on http://localhost:{port}{c.RESET}")
+                _server_ready_event.set()
                 httpd.serve_forever()
                 return
             except OSError:
@@ -781,11 +786,14 @@ def start_server_thread(port: int):
                     _kill_port_if_busy(port)
                 else:
                     _lp.log(f"{c.RED}Error: Port {port} is busy.{c.RESET}")
+                    _server_ready_event.set()
             except Exception as e:
                 _lp.log(f"{c.RED}Server error: {e}{c.RESET}")
+                _server_ready_event.set()
                 return
         with _http_server_lock:
             _http_server_started = False
+        _server_ready_event.set()
 
     if sys.platform == "linux":
         _si_thread = threading.Thread(target=_update_sysinfo_loop, daemon=True, name="sysinfo")
@@ -2598,6 +2606,9 @@ def main():
     _torrent_ok = _torrent_result[0]
     if not _torrent_ok and CREATE_TORRENT_FILE:
         error("Torrent creation failed!")
+
+    if START_HTTP_SERVER:
+        _server_ready_event.wait(timeout=5)
 
     if _torrent_ok or not CREATE_TORRENT_FILE:
         print(f"\n{c.BOLD}{c.GREEN}ALL DONE!{c.RESET}")
