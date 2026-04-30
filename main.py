@@ -21,7 +21,7 @@ except ModuleNotFoundError:
 import json
 from urllib.parse import quote, urlparse, parse_qs
 try:
-    import PyPDF2
+    import PyPDF2  # type: ignore
 except ImportError:
     PyPDF2 = None
 import threading
@@ -745,8 +745,12 @@ def _update_sysinfo_loop() -> None:
             _cpu_prev_stat = (total, idle)
             with open('/proc/meminfo', 'r') as f:
                 mem = f.read()
-            mem_total_kb = int(re.search(r'MemTotal:\s+(\d+)', mem).group(1))
-            mem_avail_kb = int(re.search(r'MemAvailable:\s+(\d+)', mem).group(1))
+            m_total = re.search(r'MemTotal:\s+(\d+)', mem)
+            m_avail = re.search(r'MemAvailable:\s+(\d+)', mem)
+            if not m_total or not m_avail:
+                continue
+            mem_total_kb = int(m_total.group(1))
+            mem_avail_kb = int(m_avail.group(1))
             disk = shutil.disk_usage('/')
             with _sysinfo_lock:
                 _sysinfo_cache.update({
