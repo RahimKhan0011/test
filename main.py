@@ -803,7 +803,7 @@ def copy_to_clipboard(text: str):
     except:
         pass
 
-def create_torrent(target: Path) -> bool:
+def create_torrent(target: Path, include_srt: bool | None = None) -> bool:
     global GENERATED_TORRENT
     if not CREATE_TORRENT_FILE:
         log("Skipping torrent creation (disabled)", "Skip")
@@ -838,13 +838,15 @@ def create_torrent(target: Path) -> bool:
         # Prompt user about .srt subtitle files
         srt_files = [f for f in target.rglob("*.srt")]
         if srt_files:
-            log(f"Found {len(srt_files)} .srt subtitle file(s) in folder.", "SRT", c.YELLOW)
-            for sf in srt_files[:3]:
-                print(f"   {c.DIM}{sf.name}{c.RESET}")
-            if len(srt_files) > 3:
-                print(f"   {c.DIM}...and {len(srt_files) - 3} more{c.RESET}")
-            ans = input(f"\n{c.BOLD}Include .srt files in torrent? [y/N]: {c.RESET}").strip().lower()
-            if ans != 'y':
+            if include_srt is None:
+                log(f"Found {len(srt_files)} .srt subtitle file(s) in folder.", "SRT", c.YELLOW)
+                for sf in srt_files[:3]:
+                    print(f"   {c.DIM}{sf.name}{c.RESET}")
+                if len(srt_files) > 3:
+                    print(f"   {c.DIM}...and {len(srt_files) - 3} more{c.RESET}")
+                ans = input(f"\n{c.BOLD}Include .srt files in torrent? [y/N]: {c.RESET}").strip().lower()
+                include_srt = (ans == 'y')
+            if not include_srt:
                 exclude_patterns.append("*.srt")
                 log("Excluding .srt files from torrent.", "SRT")
 
@@ -1538,6 +1540,24 @@ def detect_language(mediainfo_text: str) -> str:
     lang_options_lower = {name.lower(): language_id for name, language_id in lang_options.items()}
     return lang_options_lower.get(language, "0")
 
+_SAMPLE_DIR_NAMES = {"sample", "samples"}
+
+def _is_sample_file(path: Path, base_dir: Path | None = None) -> bool:
+    """Return True if *path* is a sample file or lives inside a sample sub-directory."""
+    if _STEM_SAMPLE_RE.search(path.stem.lower()):
+        return True
+    check = path.parent
+    while True:
+        if check.name.lower() in _SAMPLE_DIR_NAMES:
+            return True
+        if base_dir is not None and check == base_dir:
+            break
+        parent = check.parent
+        if parent == check:
+            break
+        check = parent
+    return False
+
 def sort_paths_by_mtime(paths: list[Path]) -> list[Path]:
     mtimes = {p: p.stat().st_mtime for p in paths}
     return sorted(paths, key=lambda p: (mtimes[p], p.name.lower()))
@@ -2056,19 +2076,26 @@ def main():
     target_path, is_folder = select_target()
     if not target_path or not target_path.exists(): return
 
-    # Rename the file/folder if it starts with a site watermark prefix (e.g. "www.UIndex.org - ").
-    clean_name = strip_leading_site_prefix(target_path.name)
-    if clean_name and clean_name != target_path.name:
-        renamed_path = target_path.parent / clean_name
+    # Rename the file/folder: strip site watermark prefix then normalize spaces/underscores to dots.
+    _stripped = strip_leading_site_prefix(target_path.name)
+    if not is_folder:
+        _stem, _ext = os.path.splitext(_stripped)
+        _norm_stem = re.sub(r'[._ ]+', '.', _stem).strip('.')
+        _final_name = (_norm_stem + _ext) if _norm_stem else _stripped
+    else:
+        _norm = re.sub(r'[._ ]+', '.', _stripped).strip('.')
+        _final_name = _norm if _norm else _stripped
+    if _final_name and _final_name != target_path.name:
+        renamed_path = target_path.parent / _final_name
         if not renamed_path.exists():
             try:
                 target_path.rename(renamed_path)
-                log(f"Renamed: '{target_path.name}' → '{clean_name}'", "Rename", c.YELLOW)
+                log(f"Renamed: '{target_path.name}' → '{_final_name}'", "Rename", c.YELLOW)
                 target_path = renamed_path
             except OSError as exc:
                 error(f"Could not rename '{target_path.name}': {exc}")
         else:
-            log(f"Skipping rename – '{clean_name}' already exists in the same directory.", "Rename", c.YELLOW)
+            log(f"Skipping rename – '{_final_name}' already exists in the same directory.", "Rename", c.YELLOW)
 
     sync_dir = target_path.parent
     LATEST_JSON = sync_dir / "latest.json"
@@ -2096,8 +2123,28 @@ def main():
     clear(); banner()
     print(f"{c.BOLD}{c.PURPLE}Selected → {target_path.name}{c.RESET} {'(Folder Mode)' if is_folder else ''}\n")
 
-    if not create_torrent(target_path):
-        if CREATE_TORRENT_FILE: input("\nPress Enter to exit..."); return
+    # Pre-ask about .srt files in the main thread (requires user input) so the
+    # torrent worker thread can run without touching stdin.
+    _srt_include: bool | None = None
+    if is_folder:
+        _srt_check = list(target_path.rglob("*.srt"))
+        if _srt_check:
+            log(f"Found {len(_srt_check)} .srt subtitle file(s) in folder.", "SRT", c.YELLOW)
+            for _sf in _srt_check[:3]:
+                print(f"   {c.DIM}{_sf.name}{c.RESET}")
+            if len(_srt_check) > 3:
+                print(f"   {c.DIM}...and {len(_srt_check) - 3} more{c.RESET}")
+            _srt_include = (input(f"\n{c.BOLD}Include .srt files in torrent? [y/N]: {c.RESET}").strip().lower() == 'y')
+
+    # Start torrent creation in a background thread so it overlaps with
+    # mediainfo, screenshot, and upload work below.
+    # daemon=True ensures the thread is killed on KeyboardInterrupt or early return
+    # rather than blocking the process; the normal path always joins explicitly below.
+    _torrent_result: list[bool] = [False]
+    def _torrent_worker():
+        _torrent_result[0] = create_torrent(target_path, _srt_include)
+    _torrent_thread = threading.Thread(target=_torrent_worker, daemon=True, name="torrent-creator")
+    _torrent_thread.start()
 
     is_audio_folder = False
     is_pdf = False
@@ -2363,7 +2410,9 @@ def main():
                 error(f"HTTP Sync Failed: {e}")
 
     else:
-        video_for_ss = video_files[0] if video_files else None
+        _base = target_path if is_folder else None
+        _non_sample = [f for f in video_files if not _is_sample_file(f, _base)]
+        video_for_ss = (_non_sample[0] if _non_sample else video_files[0]) if video_files else None
 
         if not video_for_ss: error("No video found!"); return
 
@@ -2430,7 +2479,16 @@ def main():
             except Exception as e:
                 error(f"HTTP Sync Failed: {e}")
 
-    print(f"\n{c.BOLD}{c.GREEN}ALL DONE!{c.RESET}")
+    # Wait for background torrent thread to complete before finishing.
+    _torrent_thread.join()
+    _torrent_ok = _torrent_result[0]
+    if not _torrent_ok and CREATE_TORRENT_FILE:
+        error("Torrent creation failed!")
+
+    if _torrent_ok or not CREATE_TORRENT_FILE:
+        print(f"\n{c.BOLD}{c.GREEN}ALL DONE!{c.RESET}")
+    else:
+        print(f"\n{c.BOLD}{c.YELLOW}DONE (torrent creation failed — description still copied to clipboard).{c.RESET}")
     print(f"{c.DIM}When you exit, sync files & generated torrents will be deleted.{c.RESET}")
     input(f"\nPress Enter to exit...")
 
