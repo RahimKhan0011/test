@@ -697,51 +697,60 @@ def _kill_port_if_busy(port: int) -> None:
 _http_server_started = False
 _http_server_lock = threading.Lock()
 
-_sysinfo_cache: dict = {'cpu': 0.0, 'ram_used': 0, 'ram_total': 0, 'disk_used': 0, 'disk_total': 0}
+_sysinfo_cache: dict = {'disk_gb': 0.0, 'traffic_gb': 0.0}
 _sysinfo_lock = threading.Lock()
-_cpu_prev_stat: tuple | None = None
 
-def _read_proc_stat() -> tuple[int, int]:
-    with open('/proc/stat', 'r') as f:
-        parts = f.readline().split()
-    vals = list(map(int, parts[1:10]))
-    total = sum(vals)
-    idle = vals[3] + (vals[4] if len(vals) > 4 else 0)
-    return total, idle
+
+def _get_app_stats() -> dict:
+    """Run app-stats show and return the latest disk and traffic values (in GB)."""
+    try:
+        result = subprocess.run(
+            ["app-stats", "show"],
+            capture_output=True, text=True, timeout=15
+        )
+        output = result.stdout
+        disk_val: float = 0.0
+        traffic_val: float = 0.0
+        current_section: str | None = None
+        last_val: float | None = None
+
+        for line in output.splitlines():
+            ls = line.strip()
+            if not ls:
+                continue
+            if 'disk stats' in ls.lower():
+                current_section = 'disk'
+                last_val = None
+            elif 'traffic stats' in ls.lower():
+                if current_section == 'disk' and last_val is not None:
+                    disk_val = last_val
+                current_section = 'traffic'
+                last_val = None
+            elif current_section and 'date' not in ls.lower():
+                parts = ls.split()
+                if len(parts) >= 3:
+                    try:
+                        last_val = float(parts[-1])
+                    except ValueError:
+                        pass
+
+        if current_section == 'traffic' and last_val is not None:
+            traffic_val = last_val
+        elif current_section == 'disk' and last_val is not None:
+            disk_val = last_val
+
+        return {'disk_gb': disk_val, 'traffic_gb': traffic_val}
+    except Exception:
+        return {'disk_gb': 0.0, 'traffic_gb': 0.0}
+
 
 def _update_sysinfo_loop() -> None:
-    global _cpu_prev_stat
     import time as _time
     while True:
-        _time.sleep(2)
-        try:
-            total, idle = _read_proc_stat()
-            cpu_pct = 0.0
-            if _cpu_prev_stat:
-                pt, pi = _cpu_prev_stat
-                dt = total - pt
-                di = idle - pi
-                cpu_pct = max(0.0, min(100.0, 100.0 * (1 - di / dt))) if dt > 0 else 0.0
-            _cpu_prev_stat = (total, idle)
-            with open('/proc/meminfo', 'r') as f:
-                mem = f.read()
-            m_total = re.search(r'MemTotal:\s+(\d+)', mem)
-            m_avail = re.search(r'MemAvailable:\s+(\d+)', mem)
-            if not m_total or not m_avail:
-                continue
-            mem_total_kb = int(m_total.group(1))
-            mem_avail_kb = int(m_avail.group(1))
-            disk = shutil.disk_usage('/')
-            with _sysinfo_lock:
-                _sysinfo_cache.update({
-                    'cpu': round(cpu_pct, 1),
-                    'ram_used': (mem_total_kb - mem_avail_kb) * 1024,
-                    'ram_total': mem_total_kb * 1024,
-                    'disk_used': disk.used,
-                    'disk_total': disk.total,
-                })
-        except Exception:
-            pass
+        stats = _get_app_stats()
+        with _sysinfo_lock:
+            _sysinfo_cache.update(stats)
+        _time.sleep(60)
 
 
 def start_server_thread(port: int):
