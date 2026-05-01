@@ -955,9 +955,8 @@ def build_name(path, is_season_pack=False):
         is_webrip_standard_res = effective_web == "WEBRip" and res in ("1080p", "720p")
         if not is_webrip_standard_res:
             parts.append("HEVC")
-
-    final = ".".join(p for p in parts if p)
-    final = clean_name(final)
+            
+    final = base
     if group:
         final += "-" + group
 
