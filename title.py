@@ -210,9 +210,7 @@ def _normalize_channel_layout(val: str) -> str:
     return ""
 
 def clean_name(n):
-    n = re.sub(r'[._ ]+', '.', n)
-    n = re.sub(r'\.+', '.', n)
-    return n.strip('.')
+    return n
 
 def strip_leading_site_prefix(name: str) -> str:
     return re.sub(
