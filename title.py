@@ -109,6 +109,22 @@ _FANSUB_RE = re.compile(
     r'(?:\[[A-Fa-f0-9]+\])?\s*$'
 )
 
+# Matches Erai-raws / HorribleSubs style filenames that use dots as word separators,
+# e.g. [Erai-raws].Show.Name.6th.Season.-.18.(CA).[1080p.CR.WEBRip.HEVC.AAC][MultiSub][Hash].mkv
+_FANSUB_DOTTED_RE = re.compile(
+    r'\[([^\]]+)\]'                                # [Group]
+    r'\.'                                          # dot separator after group
+    r'(.+?)'                                       # title (lazy; dots are word separators)
+    r'\.-\.'                                       # .-.  title/episode separator
+    r'(E?\d+(?:\.\d+)?)'                           # episode number
+    r'(?:v\d+)?'                                   # optional version (vN)
+    r'(?:\.?\([A-Za-z]{2,4}\))?'                  # optional language/country code e.g. (CA)
+    r'(?:\.[\(\[](\d+p)[^\)\]]*[\)\]])?'          # optional resolution e.g. .[1080p.CR.WEBRip.HEVC.AAC]
+    r'(?:\s*\[(?![A-Fa-f0-9]{8,}\])[^\]]+\]\s*)*' # optional non-hash brackets e.g. [MultiSub]
+    r'(?:\s*\[[A-Fa-f0-9]+\])?'                   # optional hash bracket
+    r'\s*$'
+)
+
 ORDINAL_SEASON_RE = re.compile(
     r"\b(\d+)(?:st|nd|rd|th)\s+Season\b", re.I
 )
@@ -1053,14 +1069,24 @@ def build_title(new_name):
 def detect_fansub(name):
     base = os.path.splitext(name)[0]
     m = _FANSUB_RE.match(base)
+    dotted = False
+    if not m:
+        m = _FANSUB_DOTTED_RE.match(base)
+        if m:
+            dotted = True
     if not m:
         return None
     raw_ep = m.group(3).strip()
     is_e_prefixed = raw_ep.upper().startswith("E")
     ep_num = int(float(raw_ep.lstrip("Ee")))
+    title = m.group(2).strip()
+    if dotted:
+        # Dots are used as word separators; replace them with spaces so that
+        # downstream season/episode detection and API queries work correctly.
+        title = title.replace(".", " ")
     return {
         "group": m.group(1).strip(),
-        "title": m.group(2).strip(),
+        "title": title,
         "episode": ep_num,
         "resolution": m.group(4),
 
