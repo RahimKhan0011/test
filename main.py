@@ -2205,26 +2205,6 @@ def main():
     if not target_path or not target_path.exists(): return
 
 
-    _stripped = strip_leading_site_prefix(target_path.name)
-    if not is_folder:
-        _stem, _ext = os.path.splitext(_stripped)
-        _norm_stem = re.sub(r'[._ ]+', '.', _stem).strip('.')
-        _final_name = (_norm_stem + _ext) if _norm_stem else _stripped
-    else:
-        _norm = re.sub(r'[._ ]+', '.', _stripped).strip('.')
-        _final_name = _norm if _norm else _stripped
-    if _final_name and _final_name != target_path.name:
-        renamed_path = target_path.parent / _final_name
-        if not renamed_path.exists():
-            try:
-                target_path.rename(renamed_path)
-                log(f"Renamed: '{target_path.name}' → '{_final_name}'", "Rename", c.YELLOW)
-                target_path = renamed_path
-            except OSError as exc:
-                error(f"Could not rename '{target_path.name}': {exc}")
-        else:
-            log(f"Skipping rename – '{_final_name}' already exists in the same directory.", "Rename", c.YELLOW)
-
     sync_dir = target_path.parent
     LATEST_JSON = sync_dir / "latest.json"
     INDEX_HTML = sync_dir / "index.html"
