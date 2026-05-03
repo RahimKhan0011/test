@@ -961,7 +961,12 @@ def build_name(path, is_season_pack=False):
     final = ".".join(p for p in parts if p)
     final = clean_name(final)
     if group:
-        final += "-" + group
+        if final.endswith(f".{group}"):
+            final = final[:-len(f".{group}")] + f"-{group}"
+        elif final.endswith(f"-{group}"):
+            pass
+        else:
+            final += "-" + group
 
     return final + ext
 
@@ -1034,6 +1039,15 @@ def build_title(new_name):
     core = head if sep else base
     group_suffix = f"-{group}" if sep else ""
     core = _reorder_audio_hdr_tokens(core)
+    
+    # Remove duplicate group from core if it exists
+    if group and core.endswith(f"-{group}"):
+        core = core[:-len(f"-{group}")]
+    elif group and core.endswith(f" {group}"):
+        core = core[:-len(f" {group}")]
+    elif group and core.endswith(f".{group}"):
+        core = core[:-len(f".{group}")]
+        
     base = core + group_suffix
 
     if re.search(r"S\d{2}E\d{2}", base, re.I):
