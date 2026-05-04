@@ -1074,10 +1074,13 @@ def get_mediainfo(path: Path) -> str:
             return result.stdout.decode("utf-8", errors="replace")
         stderr_msg = result.stderr.decode("utf-8", errors="replace").strip()
         error(f"MediaInfo exited with code {result.returncode}: {stderr_msg}" if stderr_msg else f"MediaInfo exited with code {result.returncode}")
-        return "Failed"
+        return ""
+    except subprocess.TimeoutExpired:
+        error("MediaInfo timed out (>120 s) — the file may be on a slow/network filesystem or contain an unusual stream. Continuing without MediaInfo data.")
+        return ""
     except Exception as e:
         error(f"MediaInfo error: {e}")
-        return "Failed"
+        return ""
 
 def create_spectrogram(audio_file: Path) -> Path | None:
     global GENERATED_SPECTROGRAM
