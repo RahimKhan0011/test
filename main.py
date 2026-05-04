@@ -1069,9 +1069,15 @@ def get_mediainfo(path: Path) -> str:
         if exe.exists(): cmd = [str(exe), str(path)]
         else: return "MediaInfo not available"
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, startupinfo=hide_window(), timeout=120)
-        return result.stdout if result.returncode == 0 else "Failed"
-    except: return "Failed"
+        result = subprocess.run(cmd, capture_output=True, startupinfo=hide_window(), timeout=120)
+        if result.returncode == 0:
+            return result.stdout.decode("utf-8", errors="replace")
+        stderr_msg = result.stderr.decode("utf-8", errors="replace").strip()
+        error(f"MediaInfo exited with code {result.returncode}" + (f": {stderr_msg}" if stderr_msg else ""))
+        return "Failed"
+    except Exception as e:
+        error(f"MediaInfo error: {e}")
+        return "Failed"
 
 def create_spectrogram(audio_file: Path) -> Path | None:
     global GENERATED_SPECTROGRAM
