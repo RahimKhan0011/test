@@ -1073,7 +1073,7 @@ def get_mediainfo(path: Path) -> str:
         if result.returncode == 0:
             return result.stdout.decode("utf-8", errors="replace")
         stderr_msg = result.stderr.decode("utf-8", errors="replace").strip()
-        error(f"MediaInfo exited with code {result.returncode}" + (f": {stderr_msg}" if stderr_msg else ""))
+        error(f"MediaInfo exited with code {result.returncode}: {stderr_msg}" if stderr_msg else f"MediaInfo exited with code {result.returncode}")
         return "Failed"
     except Exception as e:
         error(f"MediaInfo error: {e}")
