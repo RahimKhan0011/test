@@ -1068,7 +1068,7 @@ def get_mediainfo(path: Path) -> str:
         exe = Path(__file__).parent / "MediaInfo.exe"
         if exe.exists(): cmd = [str(exe), str(path)]
         else: return "MediaInfo not available"
-    _timeout = 120
+    _timeout = 300
     try:
         result = subprocess.run(cmd, capture_output=True, startupinfo=hide_window(), timeout=_timeout)
         if result.returncode == 0:
