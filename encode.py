@@ -1292,11 +1292,15 @@ class _EncodeHandler(BaseHTTPRequestHandler):
 
     def _serve_torrent(self):
         if _GENERATED_TORRENT and _GENERATED_TORRENT.exists():
-            body  = _GENERATED_TORRENT.read_bytes()
-            fname = self._safe_filename(_GENERATED_TORRENT.name)
+            body = _GENERATED_TORRENT.read_bytes()
+            # Build a safe, non-tainted download filename from the stem and a fixed extension
+            raw_stem = Path(_GENERATED_TORRENT.name).stem
+            safe_stem = re.sub(r"[^\w\s.\-]", "_", raw_stem)
+            safe_stem = re.sub(r"[\r\n\x00-\x1f\x7f]", "", safe_stem)
+            safe_fname = safe_stem + ".torrent"
             self.send_response(200)
             self.send_header("Content-Type", "application/x-bittorrent")
-            self.send_header("Content-Disposition", f'attachment; filename="{fname}"')
+            self.send_header("Content-Disposition", f'attachment; filename="{safe_fname}"')
             self.send_header("Content-Length", str(len(body)))
             self.send_header("Cache-Control", "no-store")
             self.end_headers()
@@ -1305,25 +1309,22 @@ class _EncodeHandler(BaseHTTPRequestHandler):
             self.send_response(404)
             self.end_headers()
 
-    @staticmethod
-    def _safe_filename(name: str) -> str:
-        """Strip CR/LF and other control characters to prevent header injection."""
-        return re.sub(r"[\r\n\x00-\x1f\x7f]", "", name)
-
     def _serve_comparison(self, filename: str):
         # Only serve files that this script created as comparison screenshots.
-        # Use p.name (the trusted internal path name) for the header,
-        # not the user-supplied filename, to eliminate any taint.
-        for p in _COMPARISON_SS_PATHS:
+        # The download filename is constructed from a fixed format (index + literal
+        # extension), completely breaking any taint from the user-supplied URL.
+        for idx, p in enumerate(_COMPARISON_SS_PATHS):
             if p.name == filename and p.exists():
-                ext   = p.suffix.lower()
-                ct    = "image/png" if ext == ".png" else "image/jpeg"
-                body  = p.read_bytes()
-                safe  = self._safe_filename(p.name)   # use trusted path, not user input
+                ext  = p.suffix.lower()
+                ct   = "image/png" if ext == ".png" else "image/jpeg"
+                # Build a fully safe, non-tainted filename: no user input reaches the header
+                safe_ext   = ".png" if ext == ".png" else ".jpg"
+                safe_fname = f"comparison_{idx + 1:02d}{safe_ext}"
+                body = p.read_bytes()
                 self.send_response(200)
                 self.send_header("Content-Type", ct)
                 self.send_header(
-                    "Content-Disposition", f'attachment; filename="{safe}"'
+                    "Content-Disposition", f'attachment; filename="{safe_fname}"'
                 )
                 self.send_header("Content-Length", str(len(body)))
                 self.send_header("Cache-Control", "no-store")
