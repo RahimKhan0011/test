@@ -1332,15 +1332,18 @@ class _EncodeHandler(BaseHTTPRequestHandler):
 
     def _serve_comparison(self, filename: str):
         # Only serve files that this script created as comparison screenshots.
-        # The download filename is constructed from a fixed format (index + literal
-        # extension), completely breaking any taint from the user-supplied URL.
         for idx, p in enumerate(_COMPARISON_SS_PATHS):
             if p.name == filename and p.exists():
                 ext  = p.suffix.lower()
                 ct   = "image/png" if ext == ".png" else "image/jpeg"
-                # Build a fully safe, non-tainted filename: no user input reaches the header
-                safe_ext   = ".png" if ext == ".png" else ".jpg"
-                safe_fname = f"comparison_{idx + 1:02d}{safe_ext}"
+                # Sanitize filename: remove path separators, control chars, and
+                # characters that are problematic in Content-Disposition headers or
+                # common filesystems (quotes, colons, wildcards, angle brackets, pipe)
+                raw_name   = p.name.replace("/", "_").replace("\\", "_")
+                safe_fname = re.sub(r'[\r\n\x00-\x1f\x7f:"*?<>|]', "_", raw_name)
+                if not safe_fname:
+                    safe_ext   = ".png" if ext == ".png" else ".jpg"
+                    safe_fname = f"comparison_{idx + 1:02d}{safe_ext}"
                 body = p.read_bytes()
                 self.send_response(200)
                 self.send_header("Content-Type", ct)
