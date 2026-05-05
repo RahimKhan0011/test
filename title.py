@@ -210,9 +210,11 @@ def _normalize_channel_layout(val: str) -> str:
     return ""
 
 def clean_name(n):
-    n = re.sub(r'[._ ]+', '.', n)
-    n = re.sub(r'\.+', '.', n)
-    return n.strip('.')
+    if n is None:
+        return None
+    cleaned = re.sub(r"[ _]+", ".", str(n))
+    cleaned = re.sub(r"\.+", ".", cleaned)
+    return cleaned.strip(".")
 
 def strip_leading_site_prefix(name: str) -> str:
     return re.sub(
@@ -957,9 +959,8 @@ def build_name(path, is_season_pack=False):
         is_webrip_standard_res = effective_web == "WEBRip" and res in ("1080p", "720p")
         if not is_webrip_standard_res:
             parts.append("HEVC")
-
-    final = ".".join(p for p in parts if p)
-    final = clean_name(final)
+            
+    final = base
     if group:
         if final.endswith(f".{group}"):
             final = final[:-len(f".{group}")] + f"-{group}"
