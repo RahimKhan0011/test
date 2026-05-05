@@ -675,7 +675,7 @@ def _upload_via_host(img: Path, host: str) -> tuple[str | None, bool]:
     filename = img.name
     try:
         if host == "imgbb":
-            if IMGBB_API_KEY in ("YOUR IMGBB API KEY", ""):
+            if not IMGBB_API_KEY:
                 return None, False
             with img.open("rb") as fh:
                 r = requests.post(
@@ -1183,7 +1183,7 @@ button.ok{{border-color:var(--grn);color:var(--grn);background:#0a1f10}}
     &nbsp;
     <button class="dl"
       style="font-size:.70rem;padding:3px 8px"
-      onclick="downloadComparison()">⬇ Download All {len(comparison_filenames)} Comparison</button>
+      onclick="downloadComparison()">⬇ Download All {len(comparison_filenames)} Comparison Screenshots</button>
     {f'<button class="dl" style="font-size:.70rem;padding:3px 8px;margin-left:4px" onclick="downloadAllTen()">⬇ Download All 10</button>' if comparison_filenames and encoded_urls else ''}
   </div>
   <div class="ss-grid">
@@ -1239,7 +1239,7 @@ function downloadComparison() {{
   COMP.forEach((fname, i) => {{
     _dlFile('/api/comparison/' + encodeURIComponent(fname), fname, i * 650);
   }});
-  toast('\u2b07 Downloading ' + COMP.length + ' comparison screenshot(s)\u2026');
+  toast('⬇ Downloading ' + COMP.length + ' comparison screenshot(s)…');
 }}
 
 function downloadAllTen() {{
@@ -1251,7 +1251,7 @@ function downloadAllTen() {{
   ENC.forEach((url, i) => {{
     setTimeout(() => window.open(url, '_blank'), (COMP.length + i) * 650);
   }});
-  toast('\u2b07 Downloading all 10 screenshots\u2026');
+  toast('⬇ Downloading all 10 screenshots…');
 }}
 </script>
 </body>
@@ -1305,6 +1305,11 @@ class _EncodeHandler(BaseHTTPRequestHandler):
             self.send_response(404)
             self.end_headers()
 
+    @staticmethod
+    def _safe_filename(name: str) -> str:
+        """Strip CR/LF and other control characters to prevent header injection."""
+        return re.sub(r"[\r\n\x00-\x1f\x7f]", "", name)
+
     def _serve_comparison(self, filename: str):
         # Only serve files that this script created as comparison screenshots
         for p in _COMPARISON_SS_PATHS:
@@ -1312,10 +1317,11 @@ class _EncodeHandler(BaseHTTPRequestHandler):
                 ext  = p.suffix.lower()
                 ct   = "image/png" if ext == ".png" else "image/jpeg"
                 body = p.read_bytes()
+                safe = self._safe_filename(filename)
                 self.send_response(200)
                 self.send_header("Content-Type", ct)
                 self.send_header(
-                    "Content-Disposition", f'attachment; filename="{filename}"'
+                    "Content-Disposition", f'attachment; filename="{safe}"'
                 )
                 self.send_header("Content-Length", str(len(body)))
                 self.send_header("Cache-Control", "no-store")
