@@ -870,6 +870,11 @@ def _bb(label: str, value: str) -> str:
     )
 
 
+def _bb_label(label: str) -> str:
+    """Return only the label part of a _bb() line (no value wrapping tags)."""
+    return f"[color=#7EC544][font=Segoe UI][b][size=4]{label}[/size][/b][/font][/color]"
+
+
 def _extract_tracks(mi_json: dict) -> dict:
     tracks = mi_json.get("media", {}).get("track", [])
     result: dict = {
@@ -978,9 +983,9 @@ def generate_description(
         src2 = strip_p2p_name(comparison_path.name)
         lines.append(_bb("Source(2):", f"{src2} (For comparison)"))
 
-    lines.append(_bb("Logs:", "[spoiler][b]{logs – keep as is, fill in yourself}[/b][/spoiler]"))
+    lines.append(_bb_label("Logs:") + " [spoiler][b]__LOGS__[/b][/spoiler]")
 
-    lines.append(_bb("Frame Comparison:", "[url=https://slow.pics/c/SMfy6mje]Click Here[/url]"))
+    lines.append(_bb_label("Frame Comparison:") + " [url=__SLOWPICS__]Click Here[/url]")
 
     lines.append(
         "[center][b][size=5][color=#59E817][font=Oswald]MediaInfo"
@@ -1038,6 +1043,8 @@ def _build_html(
     comp_names_json  = json.dumps(comparison_filenames)
     imdb_url = f"https://www.imdb.com/find?q={quote(title_str, safe='')}"
     enc_names_json   = json.dumps(encoded_filenames)
+    base_desc_json   = json.dumps(description)
+    default_logs_json = json.dumps("{logs \u2013 keep as is, fill in yourself}")
     desc_escaped     = (
         description.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
     )
@@ -1098,7 +1105,8 @@ button.ok{{border-color:var(--grn);color:var(--grn);background:#0a1f10}}
 <div class="card">
   <div class="lbl">Title</div>
   <div id="title-box" style="padding:8px;background:var(--bg);border:1px solid var(--brd);
-    border-radius:6px;font-size:.85rem;margin-bottom:10px">{title_str}</div>
+    border-radius:6px;font-size:.85rem;margin-bottom:10px;
+    word-break:break-all;overflow-wrap:break-word">{title_str}</div>
   <div class="btns">
     <button onclick="copyTitle()">📋 Copy Title</button>
     <a href="{imdb_url}" target="_blank" rel="noopener noreferrer">
@@ -1113,6 +1121,26 @@ button.ok{{border-color:var(--grn);color:var(--grn);background:#0a1f10}}
   <div class="btns">
     <button onclick="copyDesc()">📋 Copy Description</button>
   </div>
+</div>
+
+<div class="card">
+  <div class="lbl">Frame Comparison · slow.pics URL</div>
+  <input type="url" id="slowpics-input"
+    placeholder="https://slow.pics/c/…"
+    style="width:100%;padding:7px 10px;background:var(--bg);border:1px solid var(--brd);
+      border-radius:6px;color:var(--txt);font-size:.82rem;margin-bottom:6px"/>
+  <div style="font-size:.70rem;color:var(--mut)">Paste your slow.pics URL – updates the description automatically.</div>
+</div>
+
+<div class="card">
+  <div class="lbl">Logs · paste here</div>
+  <textarea id="logs-input"
+    placeholder="Paste your encode log here – it will be wrapped in [spoiler] in the description."
+    style="width:100%;height:110px;padding:7px 10px;background:var(--bg);
+      border:1px solid var(--brd);border-radius:6px;color:var(--txt);
+      font-size:.73rem;font-family:'Courier New',monospace;resize:vertical;
+      margin-bottom:6px"></textarea>
+  <button onclick="clearLogs()">🗑 Clear</button>
 </div>
 
 <div class="card">
@@ -1155,7 +1183,8 @@ button.ok{{border-color:var(--grn);color:var(--grn);background:#0a1f10}}
 <script>
 const COMP = {comp_names_json};
 const ENC  = {enc_names_json};
-const DESC = document.getElementById('desc-box').textContent;
+const BASE_DESC = {base_desc_json};
+const DEFAULT_LOGS = {default_logs_json};
 
 let _toastTimer = null;
 function toast(m) {{
@@ -1179,12 +1208,27 @@ async function cpText(s) {{
   }}
 }}
 
+function getCurrentDesc() {{
+  const logsVal = document.getElementById('logs-input').value.trim() || DEFAULT_LOGS;
+  const slowVal = document.getElementById('slowpics-input').value.trim() || 'https://slow.pics/c/';
+  return BASE_DESC.replace('__LOGS__', logsVal).replace('__SLOWPICS__', slowVal);
+}}
+
+function updateDescDisplay() {{
+  document.getElementById('desc-box').textContent = getCurrentDesc();
+}}
+
 function copyDesc() {{
-  cpText(DESC).then(() => toast('✓ Description copied'));
+  cpText(getCurrentDesc()).then(() => toast('✓ Description copied'));
 }}
 
 function copyTitle() {{
   cpText(document.getElementById('title-box').textContent.trim()).then(() => toast('✓ Title copied'));
+}}
+
+function clearLogs() {{
+  document.getElementById('logs-input').value = '';
+  updateDescDisplay();
 }}
 
 function _dlFile(url, filename, delay) {{
@@ -1223,6 +1267,10 @@ function downloadAllTen() {{
   }});
   toast('⬇ Downloading all 10 screenshots…');
 }}
+
+document.getElementById('slowpics-input').addEventListener('input', updateDescDisplay);
+document.getElementById('logs-input').addEventListener('input', updateDescDisplay);
+updateDescDisplay();
 </script>
 </body>
 </html>"""
@@ -1309,13 +1357,18 @@ class _EncodeHandler(BaseHTTPRequestHandler):
 
     def _serve_encoded(self, filename: str):
         # Only serve files that this script created as encoded screenshots.
-        # Download filename is constructed from a fixed format, not from user input.
         for idx, p in enumerate(_ENCODED_SS_PATHS):
             if p.name == filename and p.exists():
-                ext        = p.suffix.lower()
-                ct         = "image/png" if ext == ".png" else "image/jpeg"
-                safe_ext   = ".png" if ext == ".png" else ".jpg"
-                safe_fname = f"encoded_{idx + 1:02d}{safe_ext}"
+                ext  = p.suffix.lower()
+                ct   = "image/png" if ext == ".png" else "image/jpeg"
+                # Sanitize filename: remove path separators, control chars, and
+                # characters that are problematic in Content-Disposition headers or
+                # common filesystems (quotes, colons, wildcards, angle brackets, pipe)
+                raw_name   = p.name.replace("/", "_").replace("\\", "_")
+                safe_fname = re.sub(r'[\r\n\x00-\x1f\x7f:"*?<>|]', "_", raw_name)
+                if not safe_fname:
+                    safe_ext   = ".png" if ext == ".png" else ".jpg"
+                    safe_fname = f"encoded_{idx + 1:02d}{safe_ext}"
                 body = p.read_bytes()
                 self.send_response(200)
                 self.send_header("Content-Type", ct)
