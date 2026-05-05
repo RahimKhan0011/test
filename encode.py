@@ -1293,7 +1293,7 @@ class _EncodeHandler(BaseHTTPRequestHandler):
     def _serve_torrent(self):
         if _GENERATED_TORRENT and _GENERATED_TORRENT.exists():
             body  = _GENERATED_TORRENT.read_bytes()
-            fname = _GENERATED_TORRENT.name
+            fname = self._safe_filename(_GENERATED_TORRENT.name)
             self.send_response(200)
             self.send_header("Content-Type", "application/x-bittorrent")
             self.send_header("Content-Disposition", f'attachment; filename="{fname}"')
@@ -1311,13 +1311,15 @@ class _EncodeHandler(BaseHTTPRequestHandler):
         return re.sub(r"[\r\n\x00-\x1f\x7f]", "", name)
 
     def _serve_comparison(self, filename: str):
-        # Only serve files that this script created as comparison screenshots
+        # Only serve files that this script created as comparison screenshots.
+        # Use p.name (the trusted internal path name) for the header,
+        # not the user-supplied filename, to eliminate any taint.
         for p in _COMPARISON_SS_PATHS:
             if p.name == filename and p.exists():
-                ext  = p.suffix.lower()
-                ct   = "image/png" if ext == ".png" else "image/jpeg"
-                body = p.read_bytes()
-                safe = self._safe_filename(filename)
+                ext   = p.suffix.lower()
+                ct    = "image/png" if ext == ".png" else "image/jpeg"
+                body  = p.read_bytes()
+                safe  = self._safe_filename(p.name)   # use trusted path, not user input
                 self.send_response(200)
                 self.send_header("Content-Type", ct)
                 self.send_header(
