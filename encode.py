@@ -1,24 +1,4 @@
 #!/usr/bin/env python3
-"""
-encode.py – Advanced encode comparison & upload tool.
-
-Usage (flag mode):
-    python encode.py -s source.mkv -c comparison.mkv -e encoded.mkv
-
-Usage (interactive mode – no flags):
-    python encode.py
-    → shows hierarchical file listing; enter: source_key,encoded_key,comparison_key
-      e.g. "1,2A,3AA"
-
-Roles
-------
--s / source     : used for full description (filename, mediainfo, video/audio info)
--c / comparison : 5 frames at 20/40/50/60/80% → served locally via web server
--e / encoded    : 5 frames at same positions   → uploaded to image host + shown in description
-
-Torrent is created for the SOURCE file.
-Generated files are deleted on exit (pre-existing files are never touched).
-"""
 
 from __future__ import annotations
 
@@ -187,7 +167,6 @@ def hide_window():
 
 
 # ========================= OWN STRIP / TITLE LOGIC =========================
-# (No import from title.py – all logic is self-contained.)
 
 _TECH_TAGS_PAT = (
     r"2160p|1080p|720p|480p"
@@ -212,16 +191,6 @@ def _strip_leading_site(name: str) -> str:
 
 
 def _extract_show_title(filename: str) -> str:
-    """
-    Extract the human-readable show/movie title from a P2P release filename.
-
-    Examples
-    --------
-    "Show.Name.S01E01.1080p.AMZN.WEB-DL.DDP5.1.H.264-Group.mkv"
-        → "Show Name S01E01"
-    "Movie.Title.2024.1080p.BluRay.x265-Group.mkv"
-        → "Movie Title 2024"
-    """
     stem = Path(filename).stem
     stem = re.sub(
         r"^\s*(?:https?://)?www\.(?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,}\s*[-–—:|]\s*",
@@ -237,17 +206,6 @@ def _extract_show_title(filename: str) -> str:
 
 
 def strip_p2p_name(filename: str) -> str:
-    """
-    Strip the show/movie name from a P2P release filename, keeping only
-    the technical part (resolution, source, codec, audio, group).
-
-    Examples
-    --------
-    "Show.Name.S01E01.1080p.AMZN.WEB-DL.DDP5.1.H.264-Group.mkv"
-        → "1080p.AMZN.WEB-DL.DDP5.1.H.264-Group"
-    "1080p.AMZN.WEB-DL.DDP5.1.H.264-Group.mkv"
-        → "1080p.AMZN.WEB-DL.DDP5.1.H.264-Group"  (unchanged)
-    """
     stem = Path(filename).stem
     stem = re.sub(
         r"^\s*(?:https?://)?www\.(?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,}\s*[-–—:|]\s*",
@@ -264,7 +222,6 @@ def strip_p2p_name(filename: str) -> str:
 # ========================= MEDIAINFO =========================
 
 def get_mediainfo_text(path: Path) -> str:
-    """Return plain-text mediainfo output."""
     cmd = ["mediainfo", str(path)]
     if not shutil.which("mediainfo"):
         exe = Path(__file__).parent / "MediaInfo.exe"
@@ -285,7 +242,6 @@ def get_mediainfo_text(path: Path) -> str:
 
 
 def get_mediainfo_json(path: Path) -> dict:
-    """Return parsed JSON from `mediainfo --Output=JSON`."""
     try:
         r = subprocess.run(
             ["mediainfo", "--Output=JSON", str(path)],
@@ -299,7 +255,6 @@ def get_mediainfo_json(path: Path) -> dict:
 
 
 def trim_mediainfo_path(text: str, base_dir: Path) -> str:
-    """Remove the absolute path prefix from 'Complete name' lines."""
     pfx_posix   = str(base_dir).replace("\\", "/").rstrip("/") + "/"
     pfx_windows = str(base_dir).replace("/", "\\").rstrip("\\") + "\\"
 
@@ -454,17 +409,12 @@ _LANG_NAMES: dict[str, str] = {
 
 
 def _lang_name(code: str) -> str:
-    """Convert a 2/3-letter language code to a full English name."""
     return _LANG_NAMES.get(code.lower().strip(), code)
 
 
 # ========================= HIERARCHICAL FILE LISTING =========================
 
 def _idx_to_letters(n: int) -> str:
-    """
-    Convert a 0-based index to an uppercase letter sequence.
-    0 → 'A', 1 → 'B', …, 25 → 'Z', 26 → 'AA', 27 → 'AB', …
-    """
     n += 1
     letters = ""
     while n > 0:
@@ -475,16 +425,6 @@ def _idx_to_letters(n: int) -> str:
 
 
 def list_files_hierarchical(base_dir: Path, max_depth: int = 3) -> list[dict]:
-    """
-    Return a flat list of dicts representing the hierarchical file/folder
-    structure up to *max_depth* levels deep.
-
-    Each dict:
-        key    – hierarchical label, e.g. "1", "2A", "3AA"
-        path   – Path object
-        is_dir – bool
-        depth  – 1-based nesting depth
-    """
     items: list[dict] = []
     top_counter = [0]
 
@@ -527,7 +467,6 @@ def list_files_hierarchical(base_dir: Path, max_depth: int = 3) -> list[dict]:
 
 
 def display_hierarchical_list(items: list[dict]) -> None:
-    """Pretty-print the hierarchical file listing."""
     for item in items:
         indent   = "  " * (item["depth"] - 1)
         name     = item["path"].name + ("/" if item["is_dir"] else "")
@@ -539,13 +478,6 @@ def display_hierarchical_list(items: list[dict]) -> None:
 # ========================= INTERACTIVE FILE SELECTION =========================
 
 def select_files_interactive() -> tuple[Path | None, Path | None, Path | None]:
-    """
-    Show a hierarchical file listing and ask the user to enter
-    three keys: Source, Encoded, Comparison (e.g. "1,2A,3AA").
-
-    Returns (source_path, encoded_path, comparison_path).
-    Allows folder navigation by entering a single folder key.
-    """
     base_dir = Path.cwd()
 
     while True:
@@ -628,14 +560,6 @@ def take_frames(
     percents: list[float] = FRAME_PERCENTS,
     label: str = "screenshots",
 ) -> list[Path]:
-    """
-    Extract one frame per entry in *percents* (each 0–1 fraction of duration).
-
-    Output filename format:  {name_prefix}{serial:03d}.{ext}
-    e.g.  "ShowName.S01E01.1080p.AMZN.WEB-DL.DDP5.1.H.264-Group001.png"
-
-    Returns the list of Path objects that were actually created.
-    """
     try:
         raw = subprocess.check_output(
             [
@@ -722,7 +646,6 @@ def _parse_upload_error(data: dict) -> str:
 
 
 def _upload_via_host(img: Path, host: str) -> tuple[str | None, bool]:
-    """Returns (url, is_fatal_error)."""
     filename = img.name
     try:
         if host == "imgbb":
@@ -783,11 +706,6 @@ def upload_image(img: Path) -> str | None:
 
 
 def upload_images_concurrent(images: list[Path]) -> list[str]:
-    """
-    Upload *images* concurrently.
-    Returns a list of URLs in the same order as *images*
-    (empty string where upload failed).
-    """
     if not images:
         return []
 
@@ -946,10 +864,9 @@ def create_torrent(target: Path, include_srt: bool | None = None) -> bool:
 # ========================= DESCRIPTION GENERATION =========================
 
 def _bb(label: str, value: str) -> str:
-    """Return one BBCode field line in the required colour scheme."""
     return (
-        f"[color=#7EC544][font=Segoe UI][b][size=5]{label}[/size][/b][/font][/color]"
-        f" [color=#037E8C][b][size=5]{value}[/size][/b][/color]"
+        f"[color=#7EC544][font=Segoe UI][b][size=4]{label}[/size][/b][/font][/color]"
+        f" [color=#037E8C][b][size=4]{value}[/size][/b][/color]"
     )
 
 
@@ -975,17 +892,6 @@ def generate_description(
     mediainfo_text:   str,
     encoded_ss_urls:  list[str],
 ) -> str:
-    """
-    Build the full BBCode description using the template from the spec:
-
-    File name / File size / Duration / Video / Audio / Subtitle(s) / Chapters /
-    Source(1) / Source(2) / Logs / Frame Comparison / MediaInfo / Screenshots
-
-    All file-level details (name, size, duration, video/audio tracks, MediaInfo)
-    come from the *encoded* file.  The source file is only referenced in
-    Source(1).  Falls back to source_path when encoded_path is not provided.
-    """
-    # The encoded file is the "main" file for all technical metadata.
     main_path = encoded_path if encoded_path else source_path
 
     mi_json = get_mediainfo_json(main_path)
@@ -998,20 +904,16 @@ def generate_description(
 
     lines: list[str] = []
 
-    # ---- File name (from encoded / main file) ----
     lines.append(_bb("File name:", main_path.name))
 
-    # ---- File size ----
     file_size = _safe_int(g.get("FileSize", 0))
     if not file_size and main_path.is_file():
         file_size = main_path.stat().st_size
     lines.append(_bb("File size:", fmt_filesize(file_size) if file_size else "N/A"))
 
-    # ---- Duration ----
     dur_s = _safe_float(g.get("Duration", 0))
     lines.append(_bb("Duration:", fmt_duration(dur_s) if dur_s else "N/A"))
 
-    # ---- Video ----
     if v:
         codec   = video_codec_display(v.get("Format", ""))
         vbr     = _safe_float(v.get("BitRate") or v.get("BitRate_Nominal", 0))
@@ -1032,7 +934,6 @@ def generate_description(
     else:
         lines.append(_bb("Video:", "N/A"))
 
-    # ---- Audio ----
     def _audio_line(a: dict) -> str:
         lang = _lang_name((a.get("Language") or "").strip() or "und")
         aco  = audio_codec_display(
@@ -1054,7 +955,6 @@ def generate_description(
         for idx, a in enumerate(audios, 1):
             lines.append(_bb(f"Audio Track {idx}:", _audio_line(a)))
 
-    # ---- Subtitles ----
     if texts:
         sub_parts = []
         for t in texts:
@@ -1065,36 +965,29 @@ def generate_description(
     else:
         lines.append(_bb("Subtitle(s):", "N/A"))
 
-    # ---- Chapters ----
     if menu:
         ch_keys = [k for k in menu if not k.startswith("@") and k != "extra"]
         lines.append(_bb("Chapters:", f"{len(ch_keys)} chapters" if ch_keys else "No"))
     else:
         lines.append(_bb("Chapters:", "No"))
 
-    # ---- Source(1) ----
     src1 = strip_p2p_name(source_path.name)
     lines.append(_bb("Source(1):", src1))
 
-    # ---- Source(2) – comparison ----
     if comparison_path:
         src2 = strip_p2p_name(comparison_path.name)
         lines.append(_bb("Source(2):", f"{src2} (For comparison)"))
 
-    # ---- Logs placeholder ----
     lines.append(_bb("Logs:", "[spoiler][b]{logs – keep as is, fill in yourself}[/b][/spoiler]"))
 
-    # ---- Frame comparison link ----
     lines.append(_bb("Frame Comparison:", "[url=https://slow.pics/c/SMfy6mje]Click Here[/url]"))
 
-    # ---- MediaInfo ----
     lines.append(
         "[center][b][size=5][color=#59E817][font=Oswald]MediaInfo"
-        "[/color][/size][/b][/center][b][/font]"
+        "[/font][/color][/size][/b][/center]"
         "[spoiler][mediainfo]" + mediainfo_text + "[/mediainfo][/spoiler]"
     )
 
-    # ---- Screenshots (encoded, uploaded) ----
     ss_bb = (
         "\n".join(f"[img]{u}[/img]" for u in encoded_ss_urls if u)
         if encoded_ss_urls else ""
@@ -1117,7 +1010,6 @@ def _build_html(
     encoded_filenames:    list[str],
     comparison_filenames: list[str],
 ) -> str:
-    """Build the full single-page HTML for the encode web UI."""
 
     # ---- encoded screenshots grid (local download links) ----
     enc_grid = ""
@@ -1144,7 +1036,6 @@ def _build_html(
         )
 
     comp_names_json  = json.dumps(comparison_filenames)
-    # IMDb search URL from the title
     imdb_url = f"https://www.imdb.com/find?q={quote(title_str, safe='')}"
     enc_names_json   = json.dumps(encoded_filenames)
     desc_escaped     = (
@@ -1512,7 +1403,6 @@ def start_server(port: int) -> None:
 # ========================= CLEANUP ON EXIT =========================
 
 def _cleanup() -> None:
-    """Delete only the files that this script created."""
     if not AUTO_DELETE_CREATED_FILES:
         return
     deleted: list[str] = []
@@ -1538,7 +1428,6 @@ atexit.register(_cleanup)
 def main() -> None:
     global _WEBAPP_HTML, _COMPARISON_SS_PATHS, _UPLOADED_ENCODED_URLS, _ENCODED_SS_PATHS
 
-    # ---- CLI argument parsing ----
     parser = argparse.ArgumentParser(
         description="Encode comparison & upload tool",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -1559,9 +1448,7 @@ def main() -> None:
                         help="Encoded file (frames uploaded to image host)")
     args = parser.parse_args()
 
-    # ---- resolve paths ----
     if args.source or args.comparison or args.encoded:
-        # Flag mode
         source_path     = Path(args.source).resolve()     if args.source     else None
         comparison_path = Path(args.comparison).resolve() if args.comparison else None
         encoded_path    = Path(args.encoded).resolve()    if args.encoded    else None
@@ -1575,7 +1462,6 @@ def main() -> None:
                 error(f"{label} file not found: {p}")
                 sys.exit(1)
     else:
-        # Interactive mode
         source_path, encoded_path, comparison_path = select_files_interactive()
 
     if source_path is None:
@@ -1590,18 +1476,14 @@ def main() -> None:
         print(f"  {c.BOLD}{c.PURPLE}Comparison → {comparison_path.name}{c.RESET}")
     print()
 
-    # The encoded file is the "main" file: all technical metadata, MediaInfo,
-    # torrent, and screenshots come from it.  Source is only for Source(1).
     main_file = encoded_path if encoded_path else source_path
     work_dir  = main_file.parent
 
-    # ---- MediaInfo for encoded (main) file ----
     _main_label = "encoded file" if encoded_path else "source file"
     log(f"Getting MediaInfo for {_main_label}…", "ℹ")
     mediainfo_text = get_mediainfo_text(main_file)
     mediainfo_text = trim_mediainfo_path(mediainfo_text, work_dir)
 
-    # ---- Start torrent creation concurrently (for the encoded file) ----
     _torrent_ok = [False]
 
     def _torrent_worker():
@@ -1612,18 +1494,17 @@ def main() -> None:
     )
     torrent_thread.start()
 
-    # ---- Take comparison & encoded screenshots concurrently ----
     comp_ss: list[Path] = []
     enc_ss:  list[Path] = []
 
     def _comp_worker():
         nonlocal comp_ss
-        prefix = comparison_path.stem   # full stem, NOT stripped
+        prefix = comparison_path.stem
         comp_ss = take_frames(comparison_path, prefix, label="comparison frames")
 
     def _enc_worker():
         nonlocal enc_ss
-        prefix = encoded_path.stem      # full stem, NOT stripped
+        prefix = encoded_path.stem
         enc_ss = take_frames(encoded_path, prefix, label="encoded frames")
 
     threads: list[threading.Thread] = []
@@ -1642,13 +1523,11 @@ def main() -> None:
     _COMPARISON_SS_PATHS = list(comp_ss)
     _ENCODED_SS_PATHS    = list(enc_ss)
 
-    # ---- Upload encoded screenshots concurrently ----
     encoded_urls: list[str] = []
     if enc_ss:
         encoded_urls = upload_images_concurrent(enc_ss)
     _UPLOADED_ENCODED_URLS = encoded_urls
 
-    # ---- Generate description ----
     log("Generating description…", "📝")
     description = generate_description(
         source_path,
@@ -1658,20 +1537,17 @@ def main() -> None:
         encoded_urls,
     )
 
-    # ---- Save .txt (optional) ----
     if not SKIP_TXT:
         txt_path = work_dir / f"{main_file.stem}_encode_description.txt"
-        if not txt_path.exists():          # never overwrite pre-existing files
+        if not txt_path.exists():
             txt_path.write_text(description, encoding="utf-8")
             _GENERATED_FILES.append(txt_path)
             success(f"Saved description → {txt_path.name}")
 
     copy_to_clipboard(description)
 
-    # ---- Build the title string (proper show/movie name from encoded/main file name) ----
-    title_str = _extract_show_title(main_file.name)
+    title_str = main_file.stem
 
-    # ---- Wait for torrent thread ----
     torrent_thread.join()
     if not _torrent_ok[0] and CREATE_TORRENT_FILE:
         error("Torrent creation failed!")
@@ -1680,7 +1556,6 @@ def main() -> None:
         _GENERATED_TORRENT.name if _GENERATED_TORRENT else f"{main_file.name}.torrent"
     )
 
-    # ---- Build web UI HTML ----
     _WEBAPP_HTML = _build_html(
         description          = description,
         title_str            = title_str,
@@ -1689,7 +1564,6 @@ def main() -> None:
         comparison_filenames = [p.name for p in comp_ss],
     )
 
-    # ---- Start web server ----
     if START_HTTP_SERVER:
         start_server(HTTP_PORT)
         _SERVER_READY.wait(timeout=5)
