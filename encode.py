@@ -59,7 +59,7 @@ AUTO_DELETE_CREATED_FILES = True
 
 # --- Web server ---
 START_HTTP_SERVER = True
-HTTP_PORT         = 40453   # different port from main.py
+HTTP_PORT         = 40482   # different port from main.py
 
 # =================================================================
 
