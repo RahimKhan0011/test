@@ -1025,7 +1025,7 @@ def generate_description(
 
     # ---- Logs placeholder ----
     lines.append(
-        "Logs:[spoiler][b]{logs_keep it as it is i will fill it myself}[/b][/spoiler]"
+        "Logs:[spoiler][b]{logs – keep as is, fill in yourself}[/b][/spoiler]"
     )
 
     # ---- Frame comparison link ----
@@ -1295,7 +1295,7 @@ class _EncodeHandler(BaseHTTPRequestHandler):
             body = _GENERATED_TORRENT.read_bytes()
             # Build a safe, non-tainted download filename from the stem and a fixed extension
             raw_stem = Path(_GENERATED_TORRENT.name).stem
-            safe_stem = re.sub(r"[^\w\s.\-]", "_", raw_stem)
+            safe_stem = re.sub(r"[^\w\s.-]", "_", raw_stem)
             safe_stem = re.sub(r"[\r\n\x00-\x1f\x7f]", "", safe_stem)
             safe_fname = safe_stem + ".torrent"
             self.send_response(200)
