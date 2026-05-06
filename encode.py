@@ -491,8 +491,8 @@ def select_files_interactive() -> tuple[Path | None, Path | None, Path | None]:
 
         print()
         print(f"  {c.DIM}Enter folder key to navigate into it.{c.RESET}")
-        print(f"  {c.DIM}Enter Source,Encoded,Comparison keys to select"
-              f" (e.g. 1,2A,3AA).{c.RESET}")
+        print(f"  {c.DIM}Enter Source,Encoded[,Comparison] keys to select"
+              f" (e.g. 1,2A or 1,2A,3AA). Comparison defaults to Source.{c.RESET}")
         print(f"  {c.WHITE}0{c.RESET} / {c.WHITE}..{c.RESET} = go up  "
               f"  {c.WHITE}q{c.RESET} = quit")
 
@@ -515,10 +515,13 @@ def select_files_interactive() -> tuple[Path | None, Path | None, Path | None]:
             base_dir = item_map[raw.upper()]["path"]
             continue
 
-        # Try parsing as three comma-separated keys
+        # Try parsing as two or three comma-separated keys
         parts = [p.strip().upper() for p in raw.split(",")]
+        if len(parts) == 2:
+            # Comparison omitted → defaults to source
+            parts.append(parts[0])
         if len(parts) != 3:
-            print(f"\n  {c.RED}✗ Enter exactly 3 keys separated by commas, "
+            print(f"\n  {c.RED}✗ Enter 2 or 3 keys separated by commas, "
                   f"or a single folder key to navigate.{c.RESET}")
             input("  Press Enter to continue…")
             continue
@@ -1122,7 +1125,7 @@ def generate_description(
     src1 = strip_p2p_name(source_path.name)
     lines.append(_bb("Source(1):", src1))
 
-    if comparison_path:
+    if comparison_path and comparison_path != source_path:
         src2 = strip_p2p_name(comparison_path.name)
         lines.append(_bb("Source(2):", f"{src2} (For comparison)"))
 
@@ -1668,11 +1671,17 @@ def main() -> None:
         error("Source file is required.")
         sys.exit(1)
 
+    # If no comparison file was specified, fall back to the source file.
+    if comparison_path is None:
+        comparison_path = source_path
+
     banner()
     print(f"  {c.BOLD}{c.PURPLE}Source     → {source_path.name}{c.RESET}")
     if encoded_path:
         print(f"  {c.BOLD}{c.PURPLE}Encoded    → {encoded_path.name}{c.RESET}")
-    if comparison_path:
+    if comparison_path == source_path:
+        print(f"  {c.BOLD}{c.PURPLE}Comparison → {comparison_path.name} (same as source){c.RESET}")
+    else:
         print(f"  {c.BOLD}{c.PURPLE}Comparison → {comparison_path.name}{c.RESET}")
     print()
 
