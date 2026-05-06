@@ -554,6 +554,112 @@ def select_files_interactive() -> tuple[Path | None, Path | None, Path | None]:
 
 # ========================= SCREENSHOT EXTRACTION =========================
 
+def get_frame_count(video: Path) -> int:
+    """Return the total video frame count via ffprobe. Returns 0 on failure."""
+    # Primary: read nb_frames stored in stream metadata
+    try:
+        raw = subprocess.check_output(
+            [
+                "ffprobe", "-v", "error",
+                "-select_streams", "v:0",
+                "-show_entries", "stream=nb_frames",
+                "-of", "default=noprint_wrappers=1:nokey=1",
+                str(video),
+            ],
+            startupinfo=hide_window(),
+            timeout=30,
+        ).decode().strip()
+        n = int(raw)
+        if n > 0:
+            return n
+    except Exception:
+        pass
+
+    # Fallback: derive from stream duration × frame-rate
+    try:
+        out = subprocess.check_output(
+            [
+                "ffprobe", "-v", "error",
+                "-select_streams", "v:0",
+                "-show_entries", "stream=r_frame_rate,duration",
+                "-of", "json",
+                str(video),
+            ],
+            startupinfo=hide_window(),
+            timeout=30,
+        ).decode().strip()
+        data   = json.loads(out)
+        stream = (data.get("streams") or [{}])[0]
+        fps_s  = stream.get("r_frame_rate", "0/1")
+        dur_s  = stream.get("duration", "0")
+        parts = fps_s.split("/")
+        num, den = parts[0], parts[1] if len(parts) > 1 else "1"
+        fps   = float(num) / float(den) if float(den) else 0.0
+        total = int(fps * float(dur_s or 0))
+        if total > 0:
+            return total
+    except Exception:
+        pass
+
+    return 0
+
+
+def take_frames_at_numbers(
+    video: Path,
+    frame_numbers: list[int],
+    name_prefix: str,
+    label: str = "screenshots",
+) -> list[Path]:
+    """Extract frames at the given absolute frame numbers (0-based) from *video*."""
+    ext    = "png" if LOSSLESS_SCREENSHOT else "jpg"
+    max_mb = 32 if IMAGE_HOST.lower() == "imgbb" else 64
+    files: list[Path] = []
+
+    log(f"Taking {len(frame_numbers)} {label} from {c.BOLD}{video.name}{c.RESET}…", "📷")
+
+    for serial, frame_num in enumerate(frame_numbers, 1):
+        out = Path(f"{name_prefix}{serial:03d}.{ext}")
+
+        cmd = [
+            "ffmpeg", "-i", str(video),
+            "-vf", f"select=eq(n\\,{frame_num})",
+            "-vframes", "1", "-vsync", "0",
+            "-q:v", "1", "-y", str(out),
+        ]
+        subprocess.run(
+            cmd,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            startupinfo=hide_window(),
+        )
+
+        if not out.exists():
+            error(f"Frame {serial}/{len(frame_numbers)} (#{frame_num}) failed for {video.name}")
+            continue
+
+        # Fall back to JPEG if PNG is too large for the host
+        size_mb = out.stat().st_size / (1 << 20)
+        if LOSSLESS_SCREENSHOT and ext == "png" and size_mb > max_mb:
+            out.unlink()
+            out = Path(f"{name_prefix}{serial:03d}.jpg")
+            cmd[-1] = str(out)
+            subprocess.run(
+                cmd,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                startupinfo=hide_window(),
+            )
+            if not out.exists():
+                error(f"Frame {serial} JPEG fallback failed for {video.name}")
+                continue
+
+        files.append(out)
+        _GENERATED_FILES.append(out)
+
+    success(f"{len(files)}/{len(frame_numbers)} {label} captured.")
+    return files
+
+
 def take_frames(
     video: Path,
     name_prefix: str,
@@ -1553,15 +1659,44 @@ def main() -> None:
     comp_ss: list[Path] = []
     enc_ss:  list[Path] = []
 
+    # Determine shared frame numbers from the encoded file so both the encoded
+    # and comparison screenshots are extracted at identical frame positions.
+    frame_numbers: list[int] = []
+    if encoded_path:
+        total_frames = get_frame_count(encoded_path)
+        if total_frames > 0:
+            frame_numbers = [
+                min(int(total_frames * pct), total_frames - 1)
+                for pct in FRAME_PERCENTS
+            ]
+            log(
+                f"Shared frame numbers: {frame_numbers} "
+                f"(from {total_frames} total frames in encoded file)",
+                "ℹ",
+            )
+        else:
+            error("Could not determine frame count for encoded file; "
+                  "falling back to timestamp-based extraction.")
+
     def _comp_worker():
         nonlocal comp_ss
         prefix = comparison_path.stem
-        comp_ss = take_frames(comparison_path, prefix, label="comparison frames")
+        if frame_numbers:
+            comp_ss = take_frames_at_numbers(
+                comparison_path, frame_numbers, prefix, label="comparison frames"
+            )
+        else:
+            comp_ss = take_frames(comparison_path, prefix, label="comparison frames")
 
     def _enc_worker():
         nonlocal enc_ss
         prefix = encoded_path.stem
-        enc_ss = take_frames(encoded_path, prefix, label="encoded frames")
+        if frame_numbers:
+            enc_ss = take_frames_at_numbers(
+                encoded_path, frame_numbers, prefix, label="encoded frames"
+            )
+        else:
+            enc_ss = take_frames(encoded_path, prefix, label="encoded frames")
 
     threads: list[threading.Thread] = []
     if comparison_path:
