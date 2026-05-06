@@ -1154,6 +1154,23 @@ def generate_description(
 
 # ========================= WEB SERVER HTML =========================
 
+def _imdb_search_name(stem: str) -> str:
+    """Return just the show or movie name from a filename stem for IMDB search."""
+    # TV show: extract everything before SxxExx or NxNN
+    m = re.search(r"S\d{2}E\d{2}", stem, re.I)
+    if not m:
+        m = re.search(r"(?<!\d)\d{1,2}x\d{2,3}(?!\d)", stem, re.I)
+    if m:
+        name = stem[:m.start()]
+    else:
+        # Movie: strip from first resolution tag or 4-digit year
+        m = re.search(r"(?<![A-Za-z0-9])(?:2160|1080|720|480)[pi]?(?![A-Za-z0-9])", stem, re.I)
+        if not m:
+            m = re.search(r"(?<![A-Za-z0-9])(?:19|20)\d{2}(?![A-Za-z0-9])", stem)
+        name = stem[:m.start()] if m else stem
+    return re.sub(r"[._]+", " ", name).strip()
+
+
 def _build_html(
     description:          str,
     title_str:            str,
@@ -1187,7 +1204,7 @@ def _build_html(
         )
 
     comp_names_json  = json.dumps(comparison_filenames)
-    imdb_url = f"https://www.imdb.com/find?q={quote(title_str, safe='')}"
+    imdb_url = f"https://www.imdb.com/find?q={quote(_imdb_search_name(title_str), safe='')}"
     enc_names_json   = json.dumps(encoded_filenames)
     base_desc_json   = json.dumps(description)
     default_logs_json = json.dumps("{logs \u2013 keep as is, fill in yourself}")
