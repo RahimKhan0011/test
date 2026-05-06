@@ -168,8 +168,8 @@ def hide_window():
 def _ffprobe_exe() -> str:
     """Return the absolute path to ffprobe by re-querying PATH each call.
 
-    This ensures a newly installed ffmpeg (e.g. after ``hash -r`` in the
-    calling shell) is picked up without restarting Python.
+    This ensures a newly installed ffmpeg is picked up without restarting
+    Python, by resolving the binary location from the system PATH each time.
     """
     return shutil.which("ffprobe") or "ffprobe"
 
@@ -619,7 +619,7 @@ def get_frame_count(video: Path) -> int:
     except Exception:
         pass
 
-    # Second fallback: use MediaInfo which reliably reports FrameCount for
+    # Third fallback: use MediaInfo which reliably reports FrameCount for
     # MKV/x264 containers that omit per-stream nb_frames / duration metadata.
     try:
         r = subprocess.check_output(
@@ -630,7 +630,7 @@ def get_frame_count(video: Path) -> int:
         mi_data = json.loads(r)
         for track in (mi_data.get("media") or {}).get("track") or []:
             if track.get("@type") == "Video":
-                n = int(track.get("FrameCount") or 0)
+                n = int(track.get("FrameCount") or 0) if str(track.get("FrameCount", "0")).isdigit() else 0
                 if n > 0:
                     return n
     except Exception:
