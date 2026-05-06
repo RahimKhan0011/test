@@ -165,6 +165,20 @@ def hide_window():
     return None
 
 
+def _ffprobe_exe() -> str:
+    """Return the absolute path to ffprobe by re-querying PATH each call.
+
+    This ensures a newly installed ffmpeg (e.g. after ``hash -r`` in the
+    calling shell) is picked up without restarting Python.
+    """
+    return shutil.which("ffprobe") or "ffprobe"
+
+
+def _ffmpeg_exe() -> str:
+    """Return the absolute path to ffmpeg by re-querying PATH each call."""
+    return shutil.which("ffmpeg") or "ffmpeg"
+
+
 # ========================= OWN STRIP / TITLE LOGIC =========================
 
 _TECH_TAGS_PAT = (
@@ -562,7 +576,7 @@ def get_frame_count(video: Path) -> int:
     try:
         raw = subprocess.check_output(
             [
-                "ffprobe", "-v", "error",
+                _ffprobe_exe(), "-v", "error",
                 "-select_streams", "v:0",
                 "-show_entries", "stream=nb_frames",
                 "-of", "default=noprint_wrappers=1:nokey=1",
@@ -582,7 +596,7 @@ def get_frame_count(video: Path) -> int:
     try:
         out = subprocess.check_output(
             [
-                "ffprobe", "-v", "error",
+                _ffprobe_exe(), "-v", "error",
                 "-select_streams", "v:0",
                 "-show_entries", "stream=r_frame_rate,duration:format=duration",
                 "-of", "json",
@@ -602,6 +616,23 @@ def get_frame_count(video: Path) -> int:
         total = int(fps * float(dur_s or 0))
         if total > 0:
             return total
+    except Exception:
+        pass
+
+    # Second fallback: use MediaInfo which reliably reports FrameCount for
+    # MKV/x264 containers that omit per-stream nb_frames / duration metadata.
+    try:
+        r = subprocess.check_output(
+            ["mediainfo", "--Output=JSON", str(video)],
+            startupinfo=hide_window(),
+            timeout=60,
+        ).decode(errors="replace")
+        mi_data = json.loads(r)
+        for track in (mi_data.get("media") or {}).get("track") or []:
+            if track.get("@type") == "Video":
+                n = int(track.get("FrameCount") or 0)
+                if n > 0:
+                    return n
     except Exception:
         pass
 
@@ -629,7 +660,7 @@ def take_frames_at_numbers(
     try:
         raw = subprocess.check_output(
             [
-                "ffprobe", "-v", "error",
+                _ffprobe_exe(), "-v", "error",
                 "-select_streams", "v:0",
                 "-show_entries", "stream=r_frame_rate",
                 "-of", "default=noprint_wrappers=1:nokey=1",
@@ -654,13 +685,13 @@ def take_frames_at_numbers(
             # decoded frame.  Much faster than decoding from the beginning.
             timestamp = frame_num / fps
             cmd = [
-                "ffmpeg", "-ss", f"{timestamp:.3f}", "-i", str(video),
+                _ffmpeg_exe(), "-ss", f"{timestamp:.3f}", "-i", str(video),
                 "-vframes", "1", "-q:v", "1", "-y", str(out),
             ]
         else:
             # Slow fallback: select-filter (decodes from stream start).
             cmd = [
-                "ffmpeg", "-i", str(video),
+                _ffmpeg_exe(), "-i", str(video),
                 "-vf", f"select=eq(n\\,{frame_num})",
                 "-vframes", "1", "-vsync", "0",
                 "-q:v", "1", "-y", str(out),
@@ -709,7 +740,7 @@ def take_frames(
     try:
         raw = subprocess.check_output(
             [
-                "ffprobe", "-v", "error",
+                _ffprobe_exe(), "-v", "error",
                 "-show_entries", "format=duration",
                 "-of", "default=noprint_wrappers=1:nokey=1",
                 str(video),
@@ -736,7 +767,7 @@ def take_frames(
         out = Path(f"{name_prefix}{serial:03d}.{ext}")
 
         cmd = [
-            "ffmpeg", "-ss", f"{timestamp:.3f}", "-i", str(video),
+            _ffmpeg_exe(), "-ss", f"{timestamp:.3f}", "-i", str(video),
             "-vframes", "1", "-q:v", "1", "-y", str(out),
         ]
         subprocess.run(
@@ -966,6 +997,7 @@ def create_torrent(target: Path, include_srt: bool | None = None) -> bool:
 
     process = subprocess.Popen(
         cmd,
+        stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
@@ -1843,6 +1875,7 @@ def main() -> None:
                 time.sleep(1)
         except KeyboardInterrupt:
             pass
+    sys.exit(0)
 
 
 if __name__ == "__main__":
