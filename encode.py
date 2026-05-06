@@ -575,13 +575,14 @@ def get_frame_count(video: Path) -> int:
     except Exception:
         pass
 
-    # Fallback: derive from stream duration × frame-rate
+    # Fallback: derive from stream duration × frame-rate; also try format-level
+    # duration for containers (e.g. MKV/HEVC) that omit per-stream duration.
     try:
         out = subprocess.check_output(
             [
                 "ffprobe", "-v", "error",
                 "-select_streams", "v:0",
-                "-show_entries", "stream=r_frame_rate,duration",
+                "-show_entries", "stream=r_frame_rate,duration:format=duration",
                 "-of", "json",
                 str(video),
             ],
@@ -591,7 +592,8 @@ def get_frame_count(video: Path) -> int:
         data   = json.loads(out)
         stream = (data.get("streams") or [{}])[0]
         fps_s  = stream.get("r_frame_rate", "0/1")
-        dur_s  = stream.get("duration", "0")
+        # Prefer stream-level duration; fall back to container-level duration.
+        dur_s  = stream.get("duration") or (data.get("format") or {}).get("duration", "0")
         parts = fps_s.split("/")
         num, den = parts[0], parts[1] if len(parts) > 1 else "1"
         fps   = float(num) / float(den) if float(den) else 0.0
