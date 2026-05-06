@@ -492,7 +492,7 @@ def select_files_interactive() -> tuple[Path | None, Path | None, Path | None]:
         print()
         print(f"  {c.DIM}Enter folder key to navigate into it.{c.RESET}")
         print(f"  {c.DIM}Enter Source,Encoded,Comparison keys to select"
-              f" (e.g. 1,2A,3AA).{c.RESET}")
+              f" (e.g. 1,2A,3AA). Comparison is optional – omit to use Source.{c.RESET}")
         print(f"  {c.WHITE}0{c.RESET} / {c.WHITE}..{c.RESET} = go up  "
               f"  {c.WHITE}q{c.RESET} = quit")
 
@@ -515,11 +515,13 @@ def select_files_interactive() -> tuple[Path | None, Path | None, Path | None]:
             base_dir = item_map[raw.upper()]["path"]
             continue
 
-        # Try parsing as three comma-separated keys
+        # Try parsing as two or three comma-separated keys
         parts = [p.strip().upper() for p in raw.split(",")]
+        if len(parts) == 2:
+            parts.append(parts[0])  # default comparison to source
         if len(parts) != 3:
-            print(f"\n  {c.RED}✗ Enter exactly 3 keys separated by commas, "
-                  f"or a single folder key to navigate.{c.RESET}")
+            print(f"\n  {c.RED}✗ Enter 2 keys (Source,Encoded) or 3 keys (Source,Encoded,Comparison)"
+                  f" separated by commas, or a single folder key to navigate.{c.RESET}")
             input("  Press Enter to continue…")
             continue
 
@@ -1668,12 +1670,17 @@ def main() -> None:
         error("Source file is required.")
         sys.exit(1)
 
+    if comparison_path is None:
+        comparison_path = source_path
+
     banner()
     print(f"  {c.BOLD}{c.PURPLE}Source     → {source_path.name}{c.RESET}")
     if encoded_path:
         print(f"  {c.BOLD}{c.PURPLE}Encoded    → {encoded_path.name}{c.RESET}")
-    if comparison_path:
+    if comparison_path and comparison_path != source_path:
         print(f"  {c.BOLD}{c.PURPLE}Comparison → {comparison_path.name}{c.RESET}")
+    elif comparison_path:
+        print(f"  {c.BOLD}{c.PURPLE}Comparison → {comparison_path.name} (same as source){c.RESET}")
     print()
 
     main_file = encoded_path if encoded_path else source_path
