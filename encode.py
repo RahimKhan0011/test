@@ -611,22 +611,58 @@ def take_frames_at_numbers(
     name_prefix: str,
     label: str = "screenshots",
 ) -> list[Path]:
-    """Extract frames at the given absolute frame numbers (0-based) from *video*."""
+    """Extract frames at the given absolute frame numbers (0-based) from *video*.
+
+    Uses fast input-seek (-ss before -i) by converting frame numbers to
+    timestamps via the stream's frame rate.  Falls back to the slow
+    select-filter only when the frame rate cannot be determined.
+    """
     ext    = "png" if LOSSLESS_SCREENSHOT else "jpg"
     max_mb = 32 if IMAGE_HOST.lower() == "imgbb" else 64
     files: list[Path] = []
+
+    # Get FPS so we can convert frame numbers → timestamps for fast seeking.
+    fps = 0.0
+    try:
+        raw = subprocess.check_output(
+            [
+                "ffprobe", "-v", "error",
+                "-select_streams", "v:0",
+                "-show_entries", "stream=r_frame_rate",
+                "-of", "default=noprint_wrappers=1:nokey=1",
+                str(video),
+            ],
+            startupinfo=hide_window(),
+            timeout=30,
+        ).decode().strip()
+        parts = raw.split("/")
+        num, den = parts[0], parts[1] if len(parts) > 1 else "1"
+        fps = float(num) / float(den) if float(den) else 0.0
+    except Exception:
+        pass
 
     log(f"Taking {len(frame_numbers)} {label} from {c.BOLD}{video.name}{c.RESET}…", "📷")
 
     for serial, frame_num in enumerate(frame_numbers, 1):
         out = Path(f"{name_prefix}{serial:03d}.{ext}")
 
-        cmd = [
-            "ffmpeg", "-i", str(video),
-            "-vf", f"select=eq(n\\,{frame_num})",
-            "-vframes", "1", "-vsync", "0",
-            "-q:v", "1", "-y", str(out),
-        ]
+        if fps > 0:
+            # Fast path: seek to the approximate timestamp, grab the first
+            # decoded frame.  Much faster than decoding from the beginning.
+            timestamp = frame_num / fps
+            cmd = [
+                "ffmpeg", "-ss", f"{timestamp:.3f}", "-i", str(video),
+                "-vframes", "1", "-q:v", "1", "-y", str(out),
+            ]
+        else:
+            # Slow fallback: select-filter (decodes from stream start).
+            cmd = [
+                "ffmpeg", "-i", str(video),
+                "-vf", f"select=eq(n\\,{frame_num})",
+                "-vframes", "1", "-vsync", "0",
+                "-q:v", "1", "-y", str(out),
+            ]
+
         subprocess.run(
             cmd,
             stdout=subprocess.DEVNULL,
