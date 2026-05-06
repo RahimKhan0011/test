@@ -1137,7 +1137,7 @@ def generate_description(
     )
 
     ss_bb = (
-        "\n".join(f"[img]{u}[/img]" for u in encoded_ss_urls if u)
+        "\n".join(f"[center][img]{u}[/img][/center]" for u in encoded_ss_urls if u)
         if encoded_ss_urls else ""
     )
     lines.append(
