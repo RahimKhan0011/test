@@ -13,6 +13,7 @@ import string
 import subprocess
 import sys
 import threading
+import time
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from math import gcd
@@ -95,8 +96,6 @@ class c:
 # Track every file this script creates so we can delete them on exit
 _GENERATED_FILES:   list[Path] = []
 _GENERATED_TORRENT: Path | None = None
-_COMPARISON_SS:     list[Path] = []   # local comparison screenshots
-_ENCODED_SS:        list[Path] = []   # encoded screenshots (also uploaded)
 
 # Shared web-server state (set after processing)
 _WEBAPP_HTML:             str        = ""
@@ -1386,6 +1385,16 @@ updateDescDisplay();
 
 # ========================= WEB SERVER =========================
 
+class _EncodeServer(HTTPServer):
+    """HTTPServer subclass that silently drops client-disconnect errors."""
+    def handle_error(self, request, client_address):
+        if sys.exc_info()[0] in (
+            ConnectionResetError, BrokenPipeError, ConnectionAbortedError
+        ):
+            return
+        super().handle_error(request, client_address)
+
+
 class _EncodeHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         parsed = urlparse(self.path)
@@ -1497,17 +1506,9 @@ class _EncodeHandler(BaseHTTPRequestHandler):
     def log_message(self, *_):
         return
 
-    def handle_error(self, request, client_address):
-        if sys.exc_info()[0] in (
-            ConnectionResetError, BrokenPipeError, ConnectionAbortedError
-        ):
-            return
-        super().handle_error(request, client_address)
-
 
 def _kill_port(port: int) -> None:
     import socket as _socket
-    import time as _time
     try:
         with _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM) as s:
             s.settimeout(0.3)
@@ -1521,7 +1522,7 @@ def _kill_port(port: int) -> None:
                 ["fuser", "-k", f"{port}/tcp"],
                 capture_output=True, check=False, timeout=5,
             )
-            _time.sleep(0.5)
+            time.sleep(0.5)
         except Exception:
             pass
 
@@ -1537,18 +1538,17 @@ def start_server(port: int) -> None:
     _kill_port(port)
 
     def _run():
-        import time as _t
         global _HTTP_STARTED
         for attempt in range(1, 4):
             try:
-                httpd = HTTPServer(("", port), _EncodeHandler)
+                httpd = _EncodeServer(("", port), _EncodeHandler)
                 log(f"Web UI → http://localhost:{port}", "⚡", c.GREEN)
                 _SERVER_READY.set()
                 httpd.serve_forever()
                 return
             except OSError:
                 if attempt < 3:
-                    _t.sleep(0.5 * attempt)
+                    time.sleep(0.5 * attempt)
                     _kill_port(port)
                 else:
                     error(f"Port {port} is busy.")
@@ -1768,7 +1768,16 @@ def main() -> None:
             f"(open in browser){c.RESET}"
         )
     print(f"{c.DIM}Generated files will be deleted on exit.{c.RESET}")
-    input(f"\nPress {c.BOLD}Enter{c.RESET} to exit…")
+    try:
+        input(f"\nPress {c.BOLD}Enter{c.RESET} to exit…")
+    except EOFError:
+        # Non-interactive stdin (e.g. piped) – keep the server alive until Ctrl-C.
+        log("Non-interactive mode detected. Press Ctrl-C to stop the server.", "ℹ", c.YELLOW)
+        try:
+            while True:
+                time.sleep(1)
+        except KeyboardInterrupt:
+            pass
 
 
 if __name__ == "__main__":
