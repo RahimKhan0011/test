@@ -1118,6 +1118,9 @@ def generate_description(
 
     if menu:
         ch_keys = [k for k in menu if not k.startswith("@") and k != "extra"]
+        if not ch_keys:
+            extra = menu.get("extra") or {}
+            ch_keys = [k for k in extra if not k.startswith("@")]
         lines.append(_bb("Chapters:", f"{len(ch_keys)} chapters" if ch_keys else "No"))
     else:
         lines.append(_bb("Chapters:", "No"))
