@@ -1125,7 +1125,7 @@ def generate_description(
     src1 = strip_p2p_name(source_path.name)
     lines.append(_bb("Source(1):", src1))
 
-    if comparison_path and comparison_path != source_path:
+    if comparison_path and comparison_path.resolve() != source_path.resolve():
         src2 = strip_p2p_name(comparison_path.name)
         lines.append(_bb("Source(2):", f"{src2} (For comparison)"))
 
@@ -1679,7 +1679,7 @@ def main() -> None:
     print(f"  {c.BOLD}{c.PURPLE}Source     → {source_path.name}{c.RESET}")
     if encoded_path:
         print(f"  {c.BOLD}{c.PURPLE}Encoded    → {encoded_path.name}{c.RESET}")
-    if comparison_path == source_path:
+    if comparison_path.resolve() == source_path.resolve():
         print(f"  {c.BOLD}{c.PURPLE}Comparison → {comparison_path.name} (same as source){c.RESET}")
     else:
         print(f"  {c.BOLD}{c.PURPLE}Comparison → {comparison_path.name}{c.RESET}")
