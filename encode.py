@@ -1337,7 +1337,7 @@ button.ok{{border-color:var(--grn);color:var(--grn);background:#ecfdf3}}
 <div class="card">
   <div class="lbl">Frame Comparison · slow.pics URL</div>
   <input type="url" id="slowpics-input"
-    placeholder="https://slow.pics/c/"
+    placeholder="https://slow.pics/c/your-comparison-id"
     style="width:100%;padding:7px 10px;background:var(--bg);border:1px solid var(--brd);
       border-radius:6px;color:var(--txt);font-size:.82rem;margin-bottom:6px"/>
   <div style="font-size:.70rem;color:var(--mut)">Paste your slow.pics URL – updates the description automatically.</div>
