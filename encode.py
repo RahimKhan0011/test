@@ -112,18 +112,18 @@ _log_lock = threading.Lock()
 
 # ========================= LOGGING =========================
 
-def log(msg: str, icon: str = "•", color: str = c.CYAN) -> None:
+def log(msg: str, icon: str = "-", color: str = c.CYAN) -> None:
     t = datetime.now().strftime("%H:%M:%S")
     with _log_lock:
         print(f"{color}[{t}] {icon} {msg}{c.RESET}", flush=True)
 
 
 def success(msg: str) -> None:
-    log(msg, "✓", c.GREEN)
+    log(msg, "OK", c.GREEN)
 
 
 def error(msg: str) -> None:
-    log(msg, "✗", c.RED)
+    log(msg, "ERR", c.RED)
 
 
 def banner() -> None:
@@ -312,6 +312,10 @@ def fmt_filesize(size_bytes: int) -> str:
     return f"{size_bytes} bytes"
 
 
+def fmt_size_gb(size_bytes: int) -> str:
+    return f"{size_bytes / (1 << 30):.2f} GB"
+
+
 def fmt_duration(seconds: float) -> str:
     h, rem = divmod(int(seconds), 3600)
     m, s   = divmod(rem, 60)
@@ -485,7 +489,13 @@ def display_hierarchical_list(items: list[dict]) -> None:
         name     = item["path"].name + ("/" if item["is_dir"] else "")
         key_str  = f"{c.WHITE}{item['key']}{c.RESET}"
         name_col = c.PURPLE if item["is_dir"] else c.CYAN
-        print(f"  {indent}{key_str}  {name_col}{name}{c.RESET}")
+        size_str = ""
+        if not item["is_dir"]:
+            try:
+                size_str = f"  {c.DIM}[{fmt_size_gb(item['path'].stat().st_size)}]{c.RESET}"
+            except OSError:
+                size_str = ""
+        print(f"  {indent}{key_str}  {name_col}{name}{c.RESET}{size_str}")
 
 
 # ========================= INTERACTIVE FILE SELECTION =========================
@@ -535,9 +545,9 @@ def select_files_interactive() -> tuple[Path | None, Path | None, Path | None]:
             # Comparison omitted → defaults to source
             parts.append(parts[0])
         if len(parts) != 3:
-            print(f"\n  {c.RED}✗ Enter 2 or 3 keys separated by commas, "
+            print(f"\n  {c.RED}Error: Enter 2 or 3 keys separated by commas, "
                   f"or a single folder key to navigate.{c.RESET}")
-            input("  Press Enter to continue…")
+            input("  Press Enter to continue...")
             continue
 
         source_key, encoded_key, comp_key = parts
@@ -561,8 +571,8 @@ def select_files_interactive() -> tuple[Path | None, Path | None, Path | None]:
 
         if errs:
             for msg in errs:
-                print(f"\n  {c.RED}✗ {msg}{c.RESET}")
-            input("  Press Enter to try again…")
+                print(f"\n  {c.RED}Error: {msg}{c.RESET}")
+            input("  Press Enter to try again...")
             continue
 
         return paths["source"], paths["encoded"], paths["comparison"]
@@ -675,7 +685,7 @@ def take_frames_at_numbers(
     except Exception:
         pass
 
-    log(f"Taking {len(frame_numbers)} {label} from {c.BOLD}{video.name}{c.RESET}…", "📷")
+    log(f"Taking {len(frame_numbers)} {label} from {c.BOLD}{video.name}{c.RESET}...", "SHOT")
 
     for serial, frame_num in enumerate(frame_numbers, 1):
         out = Path(f"{name_prefix}{serial:03d}.{ext}")
@@ -760,7 +770,7 @@ def take_frames(
     max_mb = 32 if IMAGE_HOST.lower() == "imgbb" else 64
     files: list[Path] = []
 
-    log(f"Taking {len(percents)} {label} from {c.BOLD}{video.name}{c.RESET}…", "📷")
+    log(f"Taking {len(percents)} {label} from {c.BOLD}{video.name}{c.RESET}...", "SHOT")
 
     for serial, pct in enumerate(percents, 1):
         timestamp = duration * pct
@@ -890,7 +900,7 @@ def upload_images_concurrent(images: list[Path]) -> list[str]:
     done   = [0]
     result_map: dict[int, str] = {}
 
-    log(f"Uploading {total} encoded screenshot(s)…", "⬆")
+    log(f"Uploading {total} encoded screenshot(s)...", "UP")
 
     with concurrent.futures.ThreadPoolExecutor(
         max_workers=_bounded_workers(total)
@@ -907,7 +917,7 @@ def upload_images_concurrent(images: list[Path]) -> list[str]:
             if url:
                 result_map[i] = url
             done[0] += 1
-            log(f"  uploaded {done[0]}/{total}", "⬆", c.CYAN)
+            log(f"  uploaded {done[0]}/{total}", "UP", c.CYAN)
 
     urls = [result_map.get(i, "") for i in range(total)]
     success(f"Uploaded {sum(1 for u in urls if u)}/{total} encoded screenshots.")
@@ -983,7 +993,7 @@ def create_torrent(target: Path, include_srt: bool | None = None) -> bool:
     cmd.append(str(target))
 
     # ---- run with progress bar ----
-    log("Creating torrent…", "🔒")
+    log("Creating torrent...", "TOR")
     _pct_re = re.compile(r"(\d+)\s*%")
     _last   = [-1]
     bar_len = 12
@@ -1158,7 +1168,10 @@ def generate_description(
         lines.append(_bb("Chapters:", "No"))
 
     src1 = strip_p2p_name(source_path.name)
-    lines.append(_bb("Source(1):", src1))
+    src1_suffix = " (thanks)"
+    if comparison_path and comparison_path.resolve() == source_path.resolve():
+        src1_suffix += " (Also for comparison)"
+    lines.append(_bb("Source:", f"{src1}{src1_suffix}"))
 
     if comparison_path and comparison_path.resolve() != source_path.resolve():
         src2 = strip_p2p_name(comparison_path.name)
@@ -1222,7 +1235,7 @@ def _build_html(
             f'<div class="ss-item">'
             f'<span class="ss-lbl">Encoded {i:02d}</span>'
             f'<a class="dl-link" href="/api/encoded/{safe}" download="{fname}">'
-            f'⬇ {fname}</a>'
+            f'Download {fname}</a>'
             f'</div>\n'
         )
 
@@ -1234,7 +1247,7 @@ def _build_html(
             f'<div class="ss-item">'
             f'<span class="ss-lbl">Comparison {i:02d}</span>'
             f'<a class="dl-link" href="/api/comparison/{safe}" download="{fname}">'
-            f'⬇ {fname}</a>'
+            f'Download {fname}</a>'
             f'</div>\n'
         )
 
@@ -1254,8 +1267,8 @@ def _build_html(
 <meta name="viewport" content="width=device-width,initial-scale=1.0"/>
 <title>Encode Upload Tool</title>
 <style>
-:root{{--bg:#0e0e10;--sur:#18181c;--brd:#2c2c34;--txt:#e2e2e8;--mut:#6a6a7a;
-  --acc:#7c6ff7;--grn:#4ade80;--yel:#facc15;--r:10px}}
+:root{{--bg:#eef3fb;--sur:#ffffff;--bg-soft:#f8fbff;--brd:#ccd7ea;--txt:#1f2937;--mut:#5b6472;
+  --acc:#4f46e5;--grn:#15803d;--yel:#b45309;--r:10px}}
 *{{box-sizing:border-box;margin:0;padding:0}}
 body{{background:var(--bg);color:var(--txt);
   font-family:'Segoe UI',system-ui,sans-serif;
@@ -1269,26 +1282,26 @@ header{{text-align:center;padding-bottom:14px;
   letter-spacing:1px;color:var(--mut);margin-bottom:8px}}
 .desc{{font-family:'Courier New',monospace;font-size:.73rem;line-height:1.5;
   white-space:pre-wrap;word-break:break-word;max-height:280px;overflow-y:auto;
-  padding:8px 10px;background:var(--bg);border:1px solid var(--brd);
+  padding:8px 10px;background:var(--bg-soft);border:1px solid var(--brd);
   border-radius:6px;margin-bottom:10px;color:#b0bac6}}
 .btns{{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:6px}}
 button{{padding:5px 12px;border-radius:6px;border:1px solid var(--brd);
-  background:#22222a;color:var(--txt);cursor:pointer;font-size:.78rem;
+  background:#f3f7ff;color:var(--txt);cursor:pointer;font-size:.78rem;
   font-weight:500;transition:background .12s}}
-button:hover{{background:#2a2a36}}
-button.dl{{border-color:#4a8fc0;color:#80b8e0;background:#0a1828}}
-button.ok{{border-color:var(--grn);color:var(--grn);background:#0a1f10}}
+button:hover{{background:#e8eefb}}
+button.dl{{border-color:#1d4ed8;color:#1d4ed8;background:#eff6ff}}
+button.ok{{border-color:var(--grn);color:var(--grn);background:#ecfdf3}}
 .tor-name{{font-size:.77rem;color:var(--mut);margin-bottom:8px;word-break:break-all}}
 .ss-grid{{display:grid;
   grid-template-columns:repeat(auto-fill,minmax(200px,1fr));
   gap:10px;margin-top:8px}}
-.ss-item{{background:var(--bg);border:1px solid var(--brd);
+.ss-item{{background:var(--bg-soft);border:1px solid var(--brd);
   border-radius:6px;padding:8px}}
 .ss-lbl{{font-size:.68rem;color:var(--mut);display:block;margin-bottom:4px}}
-.dl-link{{color:#7ab4f0;font-size:.76rem;word-break:break-all;
+.dl-link{{color:#1d4ed8;font-size:.76rem;word-break:break-all;
   text-decoration:none}}
 .dl-link:hover{{text-decoration:underline}}
-.toast{{position:fixed;bottom:16px;right:16px;background:#22222a;
+.toast{{position:fixed;bottom:16px;right:16px;background:#ffffff;
   border:1px solid var(--brd);border-radius:8px;padding:7px 14px;
   font-size:.80rem;color:var(--grn);opacity:0;transform:translateY(5px);
   transition:opacity .17s,transform .17s;pointer-events:none;z-index:9999}}
@@ -1297,7 +1310,7 @@ button.ok{{border-color:var(--grn);color:var(--grn);background:#0a1f10}}
 </head>
 <body>
 <header>
-  <div class="logo">⚡ Encode Comparison &amp; Upload Tool</div>
+  <div class="logo">Encode Comparison &amp; Upload Tool</div>
 </header>
 
 <div class="card">
@@ -1306,9 +1319,9 @@ button.ok{{border-color:var(--grn);color:var(--grn);background:#0a1f10}}
     border-radius:6px;font-size:.85rem;margin-bottom:10px;
     word-break:break-all;overflow-wrap:break-word">{title_str}</div>
   <div class="btns">
-    <button onclick="copyTitle()">📋 Copy Title</button>
+    <button onclick="copyTitle()">Copy Title</button>
     <a href="{imdb_url}" target="_blank" rel="noopener noreferrer">
-      <button>🔍 Search IMDb</button>
+      <button>Search IMDb</button>
     </a>
   </div>
 </div>
@@ -1317,14 +1330,14 @@ button.ok{{border-color:var(--grn);color:var(--grn);background:#0a1f10}}
   <div class="lbl">Description · BBCode</div>
   <pre class="desc" id="desc-box">{desc_escaped}</pre>
   <div class="btns">
-    <button onclick="copyDesc()">📋 Copy Description</button>
+    <button onclick="copyDesc()">Copy Description</button>
   </div>
 </div>
 
 <div class="card">
   <div class="lbl">Frame Comparison · slow.pics URL</div>
   <input type="url" id="slowpics-input"
-    placeholder="https://slow.pics/c/…"
+    placeholder="https://slow.pics/c/your-comparison-id"
     style="width:100%;padding:7px 10px;background:var(--bg);border:1px solid var(--brd);
       border-radius:6px;color:var(--txt);font-size:.82rem;margin-bottom:6px"/>
   <div style="font-size:.70rem;color:var(--mut)">Paste your slow.pics URL – updates the description automatically.</div>
@@ -1338,7 +1351,7 @@ button.ok{{border-color:var(--grn);color:var(--grn);background:#0a1f10}}
       border:1px solid var(--brd);border-radius:6px;color:var(--txt);
       font-size:.73rem;font-family:'Courier New',monospace;resize:vertical;
       margin-bottom:6px"></textarea>
-  <button onclick="clearLogs()">🗑 Clear</button>
+  <button onclick="clearLogs()">Clear</button>
 </div>
 
 <div class="card">
@@ -1346,7 +1359,7 @@ button.ok{{border-color:var(--grn);color:var(--grn);background:#0a1f10}}
   <div class="tor-name">{torrent_filename}</div>
   <div class="btns">
     <button class="dl"
-      onclick="window.location.href='/api/torrent'">⬇ Download Torrent</button>
+      onclick="window.location.href='/api/torrent'">Download Torrent</button>
   </div>
 </div>
 
@@ -1356,7 +1369,7 @@ button.ok{{border-color:var(--grn);color:var(--grn);background:#0a1f10}}
     &nbsp;
     <button class="dl"
       style="font-size:.70rem;padding:3px 8px"
-      onclick="downloadEncoded()">⬇ Download All {len(encoded_filenames)} Encoded Screenshots</button>
+      onclick="downloadEncoded()">Download All {len(encoded_filenames)} Encoded Screenshots</button>
   </div>
   <div class="ss-grid">
     {enc_grid or '<span style="color:var(--mut);font-size:.8rem">No encoded screenshots.</span>'}
@@ -1369,8 +1382,8 @@ button.ok{{border-color:var(--grn);color:var(--grn);background:#0a1f10}}
     &nbsp;
     <button class="dl"
       style="font-size:.70rem;padding:3px 8px"
-      onclick="downloadComparison()">⬇ Download All {len(comparison_filenames)} Comparison Screenshots</button>
-    {f'<button class="dl" style="font-size:.70rem;padding:3px 8px;margin-left:4px" onclick="downloadAllTen()">⬇ Download All 10</button>' if comparison_filenames and encoded_filenames else ''}
+      onclick="downloadComparison()">Download All {len(comparison_filenames)} Comparison Screenshots</button>
+    {f'<button class="dl" style="font-size:.70rem;padding:3px 8px;margin-left:4px" onclick="downloadAllTen()">Download All 10</button>' if comparison_filenames and encoded_filenames else ''}
   </div>
   <div class="ss-grid">
     {comp_grid or '<span style="color:var(--mut);font-size:.8rem">No comparison screenshots.</span>'}
@@ -1417,11 +1430,11 @@ function updateDescDisplay() {{
 }}
 
 function copyDesc() {{
-  cpText(getCurrentDesc()).then(() => toast('✓ Description copied'));
+  cpText(getCurrentDesc()).then(() => toast('Description copied'));
 }}
 
 function copyTitle() {{
-  cpText(document.getElementById('title-box').textContent.trim()).then(() => toast('✓ Title copied'));
+  cpText(document.getElementById('title-box').textContent.trim()).then(() => toast('Title copied'));
 }}
 
 function clearLogs() {{
@@ -1445,7 +1458,7 @@ function downloadEncoded() {{
   ENC.forEach((fname, i) => {{
     _dlFile('/api/encoded/' + encodeURIComponent(fname), fname, i * 650);
   }});
-  toast('⬇ Downloading ' + ENC.length + ' encoded screenshot(s)…');
+  toast('Downloading ' + ENC.length + ' encoded screenshot(s)...');
 }}
 
 function downloadComparison() {{
@@ -1453,7 +1466,7 @@ function downloadComparison() {{
   COMP.forEach((fname, i) => {{
     _dlFile('/api/comparison/' + encodeURIComponent(fname), fname, i * 650);
   }});
-  toast('⬇ Downloading ' + COMP.length + ' comparison screenshot(s)…');
+  toast('Downloading ' + COMP.length + ' comparison screenshot(s)...');
 }}
 
 function downloadAllTen() {{
@@ -1463,7 +1476,7 @@ function downloadAllTen() {{
   COMP.forEach((fname, i) => {{
     _dlFile('/api/comparison/' + encodeURIComponent(fname), fname, (ENC.length + i) * 650);
   }});
-  toast('⬇ Downloading all 10 screenshots…');
+  toast('Downloading all 10 screenshots...');
 }}
 
 document.getElementById('slowpics-input').addEventListener('input', updateDescDisplay);
@@ -1633,7 +1646,7 @@ def start_server(port: int) -> None:
         for attempt in range(1, 4):
             try:
                 httpd = _EncodeServer(("", port), _EncodeHandler)
-                log(f"Web UI → http://localhost:{port}", "⚡", c.GREEN)
+                log(f"Web UI -> http://localhost:{port}", "WEB", c.GREEN)
                 _SERVER_READY.set()
                 httpd.serve_forever()
                 return
@@ -1741,7 +1754,7 @@ def main() -> None:
     work_dir  = main_file.parent
 
     _main_label = "encoded file" if encoded_path else "source file"
-    log(f"Getting MediaInfo for {_main_label}…", "ℹ")
+    log(f"Getting MediaInfo for {_main_label}...", "INFO")
     mediainfo_text = get_mediainfo_text(main_file)
     mediainfo_text = trim_mediainfo_path(mediainfo_text, work_dir)
 
@@ -1771,7 +1784,7 @@ def main() -> None:
             log(
                 f"Shared frame numbers: {frame_numbers} "
                 f"(from {total_frames} total frames in encoded file)",
-                "ℹ",
+                "INFO",
             )
         else:
             error("Could not determine frame count for encoded file; "
@@ -1818,7 +1831,7 @@ def main() -> None:
         encoded_urls = upload_images_concurrent(enc_ss)
     _UPLOADED_ENCODED_URLS = encoded_urls
 
-    log("Generating description…", "📝")
+    log("Generating description...", "DESC")
     description = generate_description(
         source_path,
         comparison_path,
@@ -1866,10 +1879,10 @@ def main() -> None:
         )
     print(f"{c.DIM}Generated files will be deleted on exit.{c.RESET}")
     try:
-        input(f"\nPress {c.BOLD}Enter{c.RESET} to exit…")
+        input(f"\nPress {c.BOLD}Enter{c.RESET} to exit...")
     except EOFError:
         # Non-interactive stdin (e.g. piped) – keep the server alive until Ctrl-C.
-        log("Non-interactive mode detected. Press Ctrl-C to stop the server.", "ℹ", c.YELLOW)
+        log("Non-interactive mode detected. Press Ctrl-C to stop the server.", "INFO", c.YELLOW)
         try:
             while True:
                 time.sleep(1)
