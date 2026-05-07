@@ -1267,7 +1267,7 @@ def _build_html(
 <meta name="viewport" content="width=device-width,initial-scale=1.0"/>
 <title>Encode Upload Tool</title>
 <style>
-:root{{--bg:#eef3fb;--sur:#ffffff;--brd:#ccd7ea;--txt:#1f2937;--mut:#5b6472;
+:root{{--bg:#eef3fb;--sur:#ffffff;--bg-soft:#f8fbff;--brd:#ccd7ea;--txt:#1f2937;--mut:#5b6472;
   --acc:#4f46e5;--grn:#15803d;--yel:#b45309;--r:10px}}
 *{{box-sizing:border-box;margin:0;padding:0}}
 body{{background:var(--bg);color:var(--txt);
@@ -1282,7 +1282,7 @@ header{{text-align:center;padding-bottom:14px;
   letter-spacing:1px;color:var(--mut);margin-bottom:8px}}
 .desc{{font-family:'Courier New',monospace;font-size:.73rem;line-height:1.5;
   white-space:pre-wrap;word-break:break-word;max-height:280px;overflow-y:auto;
-  padding:8px 10px;background:#f8fbff;border:1px solid var(--brd);
+  padding:8px 10px;background:var(--bg-soft);border:1px solid var(--brd);
   border-radius:6px;margin-bottom:10px;color:#b0bac6}}
 .btns{{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:6px}}
 button{{padding:5px 12px;border-radius:6px;border:1px solid var(--brd);
@@ -1295,7 +1295,7 @@ button.ok{{border-color:var(--grn);color:var(--grn);background:#ecfdf3}}
 .ss-grid{{display:grid;
   grid-template-columns:repeat(auto-fill,minmax(200px,1fr));
   gap:10px;margin-top:8px}}
-.ss-item{{background:#f8fbff;border:1px solid var(--brd);
+.ss-item{{background:var(--bg-soft);border:1px solid var(--brd);
   border-radius:6px;padding:8px}}
 .ss-lbl{{font-size:.68rem;color:var(--mut);display:block;margin-bottom:4px}}
 .dl-link{{color:#1d4ed8;font-size:.76rem;word-break:break-all;
