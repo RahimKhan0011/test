@@ -79,7 +79,7 @@ _HDR_BLOCK_PATTERN = r"(?:DV(?:\.HDR10\+?|\.HDR10|\.HLG)?|HDR10\+?|HDR10|HDR|HLG
 _BASE_AUDIO_PATTERN = (
     r"(?:DDP?\+?\d(?:\.\d)?"
     r"|TrueHD\d(?:\.\d)?|DTS(?:-HD(?:\.MA|\.HRA)|-X)?\d(?:\.\d)?"
-    r"|AAC(?:[.\s]?\d(?:\.\d)?)?|FLAC|Opus)"
+    r"|AAC(?:\d(?:\.\d)?|[.\s]+\d(?:\.\d)?)?|FLAC|Opus)"
 )
 _AUDIO_BLOCK_PATTERN = rf"(?:{_BASE_AUDIO_PATTERN}(?:\.Atmos)?|Atmos)"
 _AUDIO_FULL_RE = re.compile(rf"(?i)\b{_AUDIO_BLOCK_PATTERN}\b")
@@ -715,7 +715,7 @@ def build_name(path, is_season_pack=False):
         rf"(?<![A-Za-z0-9])(?:"
         rf"(?:DD\+|DDP|DD|TrueHD|DTS(?:-(?:HD\.MA|HD\.HRA|X))?)"
         rf"(?:{_OPTIONAL_CHANNEL_LAYOUT_PAT}(?:\.Atmos)?|(?:\.Atmos){_OPTIONAL_CHANNEL_LAYOUT_PAT})?"
-        r"|AAC(?:[.\s]?\d(?:\.\d)?)?|FLAC|Opus|Atmos)(?![A-Za-z0-9])",
+        r"|AAC(?:\d(?:\.\d)?|[.\s]+\d(?:\.\d)?)?|FLAC|Opus|Atmos)(?![A-Za-z0-9])",
         base,
         re.I,
     )
@@ -736,8 +736,8 @@ def build_name(path, is_season_pack=False):
             audio = re.sub(r"(?i)^DDP\.\s*", "DDP", audio)
         elif re.match(r"(?i)^DD\+", audio):
             audio = re.sub(r"(?i)^DD\+\s*", "DDP", audio)
-        elif re.match(r"(?i)^AAC(?:[.\s]|(?=\d))", audio):
-            audio = re.sub(r"(?i)^AAC[.\s]*(?=\d)", "AAC", audio)
+        elif re.match(r"(?i)^AAC[.\s]+(?=\d)", audio):
+            audio = re.sub(r"(?i)^AAC[.\s]+(?=\d)", "AAC", audio)
         audio = re.sub(r"(?i)(DDP)[\s.]+(?=\d)", r"\1", audio)
 
 
