@@ -736,8 +736,8 @@ def build_name(path, is_season_pack=False):
             audio = re.sub(r"(?i)^DDP\.\s*", "DDP", audio)
         elif re.match(r"(?i)^DD\+", audio):
             audio = re.sub(r"(?i)^DD\+\s*", "DDP", audio)
-        elif re.match(r"(?i)^AAC[.\s]", audio):
-            audio = re.sub(r"(?i)^AAC[.\s]+(?=\d)", "AAC", audio)
+        elif re.match(r"(?i)^AAC(?:[.\s]|(?=\d))", audio):
+            audio = re.sub(r"(?i)^AAC[.\s]*(?=\d)", "AAC", audio)
         audio = re.sub(r"(?i)(DDP)[\s.]+(?=\d)", r"\1", audio)
 
 
