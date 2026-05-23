@@ -68,6 +68,9 @@ VIDEO_EXTS = {
     ".mkv", ".mp4", ".avi", ".mov", ".m4v", ".webm",
     ".flv", ".wmv", ".mpg", ".mpeg", ".ts", ".m2ts",
 }
+_STEM_SAMPLE_RE = re.compile(r"(?:^|[^a-zA-Z])sample(?:[^a-zA-Z]|$)", re.I)
+_RAR_VOLUME_RE = re.compile(r"\.r\d+$", re.I)
+_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif", ".tif", ".tiff"}
 
 _FILENAME_SERVICES = [
     "AMZN", "NF", "VIKI", "AHA", "SNXT", "KCW", "DSNP", "ATV", "JHS", "WTV",
@@ -948,21 +951,29 @@ def create_torrent(target: Path, include_srt: bool | None = None) -> bool:
     exclude: list[str] = []
     if target.is_dir():
         exclude.extend(["*.nfo", "*.txt", "*.srr"])
-        _skip_dirs = {
+        _skip_names = {
             "screens", "screen", "proof", "screenshots", "screenshot",
             "sample", "samples",
         }
         for item in target.rglob("*"):
             ln = item.name.lower()
+            stem_lower = item.stem.lower()
+            suffix_lower = item.suffix.lower()
             try:
                 rel = item.relative_to(target).as_posix()
             except ValueError:
                 continue
-            if item.is_dir() and ln in _skip_dirs:
+            if item.is_dir() and ln in _skip_names:
                 pattern = f"{rel}/**"
                 if pattern not in exclude:
                     exclude.append(pattern)
-            elif item.is_file() and ln in _skip_dirs:
+            elif item.is_file() and (
+                _STEM_SAMPLE_RE.search(stem_lower)
+                or stem_lower in _skip_names
+                or suffix_lower in _IMAGE_EXTENSIONS
+                or suffix_lower == ".rar"
+                or _RAR_VOLUME_RE.search(ln)
+            ):
                 if rel not in exclude:
                     exclude.append(rel)
 
