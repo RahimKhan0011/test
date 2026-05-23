@@ -189,6 +189,8 @@ _IMDB_CLEAN_RE = re.compile(
 
 
 _STEM_SAMPLE_RE = re.compile(r'(?:^|[^a-zA-Z])sample(?:[^a-zA-Z]|$)', re.I)
+_RAR_VOLUME_RE = re.compile(r"\.r\d+$", re.I)
+_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif", ".tif", ".tiff"}
 
 def _clean_title_for_imdb(title: str) -> str:
     clean = _IMDB_CLEAN_RE.sub('', title)
@@ -978,10 +980,11 @@ def create_torrent(target: Path, include_srt: bool | None = None) -> bool:
         exclude_patterns.extend(["*.nfo", "*.txt","*.srr"])
 
 
-        _exclude_dir_names = {"screens", "screen", "proof", "screenshots", "screenshot", "Sample", "sample"}
+        _exclude_dir_names = {"screens", "screen", "proof", "screenshots", "screenshot", "sample", "samples"}
         for item in target.rglob("*"):
             lower_name = item.name.lower()
             stem_lower = item.stem.lower()
+            suffix_lower = item.suffix.lower()
             try:
                 rel = item.relative_to(target).as_posix()
             except ValueError:
@@ -990,7 +993,13 @@ def create_torrent(target: Path, include_srt: bool | None = None) -> bool:
                 pattern = f"{rel}/**"
                 if pattern not in exclude_patterns:
                     exclude_patterns.append(pattern)
-            elif item.is_file() and (_STEM_SAMPLE_RE.search(stem_lower) or stem_lower in _exclude_dir_names):
+            elif item.is_file() and (
+                _STEM_SAMPLE_RE.search(stem_lower)
+                or stem_lower in _exclude_dir_names
+                or suffix_lower in _IMAGE_EXTENSIONS
+                or lower_name.endswith(".rar")
+                or _RAR_VOLUME_RE.search(lower_name)
+            ):
                 if rel not in exclude_patterns:
                     exclude_patterns.append(rel)
 
