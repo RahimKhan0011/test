@@ -202,7 +202,7 @@ RELEASE_GROUP_KEYWORDS = {
     "RockstarBackup": ["[Rockstar Games Launcher Backup]", "[Rockstar Games Backup]", "Rockstar Games Backup", "Rockstar Backup", "(Rockstar Backup)", "[Rockstar Backup]", "{Rockstar Backup}", "Rockstar Launcher Backup", "(Rockstar Launcher Backup)", "[Rockstar Launcher Backup]", "{Rockstar Launcher Backup}"],
     "EABackup": ["[EA Backup]", "EA Backup", "EAOrigin Backup", "[EAOrigin Backup]", "Origin/EA Backup", "[Origin/EA Backup]", "EA-Backup", "(EA Backup)", "{EA Backup}", "EA/Origin Game Launcher Backup", "EA/Origin Game Backup", "EA/Origin Backup", "(EA/Origin Backup)", "[EA/Origin Backup]", "{EA/Origin Backup}", "Origin Backup", "(Origin Backup)", "[Origin Backup]", "{Origin Backup}", "EA APP Backup", "(EA APP Backup)", "[EA APP Backup]", "{EA APP Backup}"],
     "UbisoftBackup": ["Ubisoft Connect Backup", "Ubisoft Backup", "[Ubisoft Connect Files]", "[Ubisoft Connect Backup]", "(Ubisoft Connect Backup)", "[Ubisoft Connect Backup]", "{Ubisoft Connect Backup}", "(Ubisoft Backup)", "[Ubisoft Backup]", "{Ubisoft Backup}"],
-    "BattleNetBackup": ["[Battle", "[Battle Blizzard Backup]", "[Battle.net Blizzard Backup]", "[Battle.net Backup]", "Battle net Files", "Battle.net Files", "Battle Files", "[Battle Files]", "Battle net Backup", "(Battle net Backup)", "[Battle net Backup]", "{Battle net Backup}", "Battle.net Backup", "(Battle.net Backup)", "[Battle.net Backup]", "{Battle.net Backup}"],
+    "BattleNetBackup": ["[Battle.net", "[Battle Blizzard Backup]", "[Battle.net Blizzard Backup]", "[Battle.net Backup]", "Battle net Files", "Battle.net Files", "Battle Files", "[Battle Files]", "Battle net Backup", "(Battle net Backup)", "[Battle net Backup]", "{Battle net Backup}", "Battle.net Backup", "(Battle.net Backup)", "[Battle.net Backup]", "{Battle.net Backup}"],
     "RiotBackup": ["Riot Games Backup", "[Riot Games Backup]", "(Riot Games Backup)", "{Riot Games Backup}", "Riot Backup", "[Riot Backup]", "(Riot Backup)", "{Riot Backup}", "Riot Games Launcher Backup", "[Riot Games Launcher Backup]", "(Riot Games Launcher Backup)", "{Riot Games Launcher Backup}"],
     "RUNE-Update": ["RUNE Update", "[RUNE Update]", "(RUNE Update)", "{RUNE Update}", "RUNE-Update", "[RUNE-Update]", "(RUNE-Update)", "RUNE.Update", "Update-RUNE", "[Update RUNE]"],
     "TENOKE-Update": ["TENOKE Update", "[TENOKE Update]", "(TENOKE Update)", "{TENOKE Update}", "TENOKE-Update", "[TENOKE-Update]", "(TENOKE-Update)", "TENOKE.Update", "Update-TENOKE", "[Update TENOKE]"],
@@ -574,7 +574,8 @@ def prepare_sync_files(sync_dir: Path, target_path: Path) -> None:
 def write_description_file(target_path: Path, description: str, is_folder: bool) -> None:
     if SKIP_TXT:
         return
-    save_name = f"{target_path.name}_description.txt" if is_folder else f"{target_path.stem}_TBD_Description.txt"
+    base_name = target_path.name if is_folder else target_path.stem
+    save_name = f"{base_name}_TBD_Description.txt"
     txt_path = target_path.parent / save_name
     txt_path.write_text(description, encoding="utf-8")
     common.GENERATED_TXT = txt_path
