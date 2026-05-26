@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import html
 import json
+import os
 import re
 import threading
 from pathlib import Path
@@ -18,12 +19,8 @@ START_HTTP_SERVER = True
 HTTP_PORT = common.HTTP_PORT
 GAME_CATEGORY = "0"
 EXCLUDED_SELECTION_NAMES = {"__pycache__"}
-YOUTUBE_API_KEYS: list[str] = []
-INTERNAL_YOUTUBE_API_KEYS = [
-    "AIzaSyDdf4cS-foL69U7-m2aYhB5gftUC3t01PI",
-    "AIzaSyCqZcGyWKFX3li4GRQ4bidrsIzjG52VzTY",
-]
-COMBINED_YOUTUBE_API_KEYS = [key.strip() for key in [*YOUTUBE_API_KEYS, *INTERNAL_YOUTUBE_API_KEYS] if key.strip()]
+TRAILER_SEARCH_SUFFIX = "game trailer"
+YOUTUBE_API_KEYS = [key.strip() for key in os.getenv("YOUTUBE_API_KEYS", "").split(",") if key.strip()]
 
 DEFAULT_IMAGES = {
     "steam": "https://i.postimg.cc/PJjDh09w/steam.png",
@@ -437,18 +434,18 @@ def build_trailer_url(data: dict) -> str:
     return ""
 
 
-def extract_game_name_and_youtube_trailer(game_name: str) -> str:
-    if not game_name or not COMBINED_YOUTUBE_API_KEYS:
+def fetch_youtube_trailer_for_game(game_name: str) -> str:
+    if not game_name or not YOUTUBE_API_KEYS:
         return ""
 
-    for api_key in COMBINED_YOUTUBE_API_KEYS:
+    for api_key in YOUTUBE_API_KEYS:
         try:
             response = requests.get(
                 "https://www.googleapis.com/youtube/v3/search",
                 params={
                     "part": "snippet",
                     "type": "video",
-                    "q": f"{game_name} game trailer",
+                    "q": f"{game_name} {TRAILER_SEARCH_SUFFIX}",
                     "key": api_key,
                     "maxResults": 1,
                 },
@@ -457,21 +454,25 @@ def extract_game_name_and_youtube_trailer(game_name: str) -> str:
             if response.status_code != 200:
                 continue
             search_results = response.json()
-        except (requests.RequestException, json.JSONDecodeError):
+        except (requests.RequestException, json.JSONDecodeError) as exc:
+            common.log(f"YouTube trailer lookup failed: {exc}", "Trailer", common.c.YELLOW)
             continue
 
         items = search_results.get("items")
         if not isinstance(items, list) or not items:
             continue
         first_item = items[0] if isinstance(items[0], dict) else {}
-        video_id = (first_item.get("id") or {}).get("videoId") if isinstance(first_item.get("id"), dict) else ""
+        first_item_id = first_item.get("id")
+        if not isinstance(first_item_id, dict):
+            continue
+        video_id = first_item_id.get("videoId")
         if isinstance(video_id, str) and video_id:
             return f"[video=https://www.youtube.com/watch?v={video_id}]"
     return ""
 
 
 def build_trailer(data: dict, game_name: str) -> str:
-    youtube_trailer = extract_game_name_and_youtube_trailer(game_name)
+    youtube_trailer = fetch_youtube_trailer_for_game(game_name)
     if youtube_trailer:
         return youtube_trailer
     return build_trailer_url(data)
