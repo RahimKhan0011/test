@@ -437,6 +437,20 @@ def build_trailer_url(data: dict) -> str:
     return ""
 
 
+def extract_video_id_from_results(search_results: dict) -> str:
+    items = search_results.get("items")
+    if not isinstance(items, list) or not items:
+        return ""
+    first_item = items[0]
+    if not isinstance(first_item, dict):
+        return ""
+    first_item_id = first_item.get("id")
+    if not isinstance(first_item_id, dict):
+        return ""
+    video_id = first_item_id.get("videoId")
+    return video_id if isinstance(video_id, str) else ""
+
+
 def fetch_youtube_trailer_for_game(game_name: str) -> str:
     youtube_api_keys = get_youtube_api_keys()
     if not game_name or not youtube_api_keys:
@@ -456,22 +470,22 @@ def fetch_youtube_trailer_for_game(game_name: str) -> str:
                 timeout=5,
             )
             if response.status_code != 200:
+                common.log(
+                    f"YouTube trailer lookup returned status {response.status_code} for '{game_name}'.",
+                    "Trailer",
+                    common.c.YELLOW,
+                )
                 continue
             search_results = response.json()
         except (requests.RequestException, json.JSONDecodeError) as exc:
-            common.log(f"YouTube trailer lookup failed ({type(exc).__name__}).", "Trailer", common.c.YELLOW)
+            common.log(
+                f"YouTube trailer lookup failed for '{game_name}' ({type(exc).__name__}).",
+                "Trailer",
+                common.c.YELLOW,
+            )
             continue
 
-        items = search_results.get("items")
-        if not isinstance(items, list) or not items:
-            continue
-        first_item = items[0]
-        if not isinstance(first_item, dict):
-            continue
-        first_item_id = first_item.get("id")
-        if not isinstance(first_item_id, dict):
-            continue
-        video_id = first_item_id.get("videoId")
+        video_id = extract_video_id_from_results(search_results)
         if isinstance(video_id, str) and video_id:
             return f"[video=https://www.youtube.com/watch?v={video_id}]"
     return ""
