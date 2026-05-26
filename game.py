@@ -23,6 +23,7 @@ TRAILER_SEARCH_SUFFIX = "game trailer"
 
 
 def get_youtube_api_keys() -> list[str]:
+    """Return configured YouTube Data API keys from YOUTUBE_API_KEYS env var."""
     return [key.strip() for key in os.getenv("YOUTUBE_API_KEYS", "").split(",") if key.strip()]
 
 DEFAULT_IMAGES = {
@@ -486,7 +487,7 @@ def fetch_youtube_trailer_for_game(game_name: str) -> str:
             continue
 
         video_id = extract_video_id_from_results(search_results)
-        if isinstance(video_id, str) and video_id:
+        if video_id:
             return f"[video=https://www.youtube.com/watch?v={video_id}]"
     return ""
 
