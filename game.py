@@ -281,6 +281,13 @@ def normalize_app_id(value: str) -> str | None:
 
 
 def detect_release_group(name: str) -> str:
+    matched_group = _detect_release_group_match(name)
+    if matched_group:
+        return matched_group
+    return DEFAULT_RELEASE_GROUP
+
+
+def _detect_release_group_match(name: str) -> str | None:
     update_match = "update" in name.lower()
     if update_match:
         if re.search(r"\b(RUNE|-RUNE|\[RUNE\]|\(RUNE\))\b", name, re.I):
@@ -303,7 +310,11 @@ def detect_release_group(name: str) -> str:
             if re.search(rf"\b{re.escape(keyword)}\b", name, re.I):
                 return group_name
 
-    return DEFAULT_RELEASE_GROUP
+    return None
+
+
+def has_release_group_match(name: str) -> bool:
+    return _detect_release_group_match(name) is not None
 
 
 def prompt_for_app_id(default_hint: str) -> str:
@@ -383,17 +394,93 @@ def format_system_requirements(pc_requirements: dict) -> str:
 
 
 def build_trailer_url(data: dict) -> str:
+    def _pick_best_quality_url(source: object) -> str:
+        if not isinstance(source, dict):
+            return ""
+        if isinstance(source.get("max"), str) and source.get("max"):
+            return source["max"]
+
+        candidates: list[tuple[int, str]] = []
+        for key, value in source.items():
+            if not isinstance(value, str) or not value:
+                continue
+            key_score = 0
+            resolution_match = re.search(r"(\d+)", str(key))
+            if resolution_match:
+                key_score = int(resolution_match.group(1))
+            candidates.append((key_score, value))
+        if not candidates:
+            return ""
+        candidates.sort(key=lambda item: item[0], reverse=True)
+        return candidates[0][1]
+
     movies = data.get("movies") or []
     for movie in movies:
         if not isinstance(movie, dict):
             continue
-        mp4 = (movie.get("mp4") or {}).get("max")
-        webm = (movie.get("webm") or {}).get("max")
+        mp4 = _pick_best_quality_url(movie.get("mp4"))
+        webm = _pick_best_quality_url(movie.get("webm"))
+        direct_trailer = movie.get("trailer")
+        if isinstance(direct_trailer, str) and direct_trailer:
+            return direct_trailer
         if mp4:
             return mp4
         if webm:
             return webm
     return ""
+
+
+def select_game_target() -> tuple[Path, bool]:
+    current = Path.cwd().resolve()
+    while True:
+        common.banner()
+        print(f"{common.c.BOLD}{common.c.CYAN}Current directory: {current}{common.c.RESET}")
+        items = common.sort_paths_by_mtime([
+            p for p in current.iterdir()
+            if p.name != "__pycache__" and has_release_group_match(p.name)
+        ])
+        if not items:
+            print(f"{common.c.YELLOW}No files/folders matched known game release groups here.{common.c.RESET}")
+            choice = input(f"{common.c.BOLD}Enter 0 to go back or q to quit: {common.c.RESET}").strip().lower()
+            if choice == "0" and current != Path.cwd().resolve():
+                current = current.parent
+                continue
+            if choice in {"0", "q"}:
+                raise SystemExit(0)
+            continue
+
+        for i, item in enumerate(items, 1):
+            typ = f"{common.c.PURPLE}Dir{common.c.RESET}" if item.is_dir() else f"{common.c.CYAN}File{common.c.RESET}"
+            print(f"  {common.c.WHITE}{i}{common.c.RESET}. {item.name} ({typ})")
+        print(
+            f"  {common.c.WHITE}0{common.c.RESET}. Go back"
+            if current != Path.cwd().resolve()
+            else f"  {common.c.WHITE}0{common.c.RESET}. Quit"
+        )
+        choice = input(f"{common.c.BOLD}Enter number: {common.c.RESET}").strip().lower()
+        if choice == "q":
+            raise SystemExit(0)
+        if choice == "0":
+            if current == Path.cwd().resolve():
+                raise SystemExit(0)
+            current = current.parent
+            continue
+        try:
+            num = int(choice)
+            if not 1 <= num <= len(items):
+                continue
+            selected = items[num - 1]
+            if selected.is_dir():
+                sub = input(f"{common.c.BOLD}Navigate (n) or select (s)? {common.c.RESET}").strip().lower()
+                if sub == "n":
+                    current = selected
+                    continue
+                if sub == "s":
+                    return selected, True
+                continue
+            return selected, False
+        except ValueError:
+            continue
 
 
 def fetch_steam_game_info(app_id: str, release_group: str) -> dict:
@@ -599,7 +686,7 @@ def main() -> None:
     common.clear()
     common.banner()
 
-    target_path, is_folder = common.select_target()
+    target_path, is_folder = select_game_target()
     if not target_path or not target_path.exists():
         return
 
