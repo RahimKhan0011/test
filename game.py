@@ -20,7 +20,10 @@ HTTP_PORT = common.HTTP_PORT
 GAME_CATEGORY = "0"
 EXCLUDED_SELECTION_NAMES = {"__pycache__"}
 TRAILER_SEARCH_SUFFIX = "game trailer"
-YOUTUBE_API_KEYS = [key.strip() for key in os.getenv("YOUTUBE_API_KEYS", "").split(",") if key.strip()]
+
+
+def get_youtube_api_keys() -> list[str]:
+    return [key.strip() for key in os.getenv("YOUTUBE_API_KEYS", "").split(",") if key.strip()]
 
 DEFAULT_IMAGES = {
     "steam": "https://i.postimg.cc/PJjDh09w/steam.png",
@@ -435,10 +438,11 @@ def build_trailer_url(data: dict) -> str:
 
 
 def fetch_youtube_trailer_for_game(game_name: str) -> str:
-    if not game_name or not YOUTUBE_API_KEYS:
+    youtube_api_keys = get_youtube_api_keys()
+    if not game_name or not youtube_api_keys:
         return ""
 
-    for api_key in YOUTUBE_API_KEYS:
+    for api_key in youtube_api_keys:
         try:
             response = requests.get(
                 "https://www.googleapis.com/youtube/v3/search",
@@ -449,19 +453,21 @@ def fetch_youtube_trailer_for_game(game_name: str) -> str:
                     "key": api_key,
                     "maxResults": 1,
                 },
-                timeout=15,
+                timeout=5,
             )
             if response.status_code != 200:
                 continue
             search_results = response.json()
         except (requests.RequestException, json.JSONDecodeError) as exc:
-            common.log(f"YouTube trailer lookup failed: {exc}", "Trailer", common.c.YELLOW)
+            common.log(f"YouTube trailer lookup failed ({type(exc).__name__}).", "Trailer", common.c.YELLOW)
             continue
 
         items = search_results.get("items")
         if not isinstance(items, list) or not items:
             continue
-        first_item = items[0] if isinstance(items[0], dict) else {}
+        first_item = items[0]
+        if not isinstance(first_item, dict):
+            continue
         first_item_id = first_item.get("id")
         if not isinstance(first_item_id, dict):
             continue
