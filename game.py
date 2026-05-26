@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import html
 import json
+import os
 import re
 import threading
 from pathlib import Path
@@ -18,6 +19,12 @@ START_HTTP_SERVER = True
 HTTP_PORT = common.HTTP_PORT
 GAME_CATEGORY = "0"
 EXCLUDED_SELECTION_NAMES = {"__pycache__"}
+TRAILER_SEARCH_SUFFIX = "game trailer"
+
+
+def get_youtube_api_keys() -> list[str]:
+    """Return configured YouTube Data API keys from YOUTUBE_API_KEYS env var."""
+    return [key.strip() for key in os.getenv("YOUTUBE_API_KEYS", "").split(",") if key.strip()]
 
 DEFAULT_IMAGES = {
     "steam": "https://i.postimg.cc/PJjDh09w/steam.png",
@@ -431,6 +438,67 @@ def build_trailer_url(data: dict) -> str:
     return ""
 
 
+def extract_video_id_from_results(search_results: dict) -> str:
+    items = search_results.get("items")
+    if not isinstance(items, list) or not items:
+        return ""
+    first_item = items[0]
+    if not isinstance(first_item, dict):
+        return ""
+    first_item_id = first_item.get("id")
+    if not isinstance(first_item_id, dict):
+        return ""
+    video_id = first_item_id.get("videoId")
+    return video_id if isinstance(video_id, str) else ""
+
+
+def fetch_youtube_trailer_for_game(game_name: str) -> str:
+    youtube_api_keys = get_youtube_api_keys()
+    if not game_name or not youtube_api_keys:
+        return ""
+
+    for api_key in youtube_api_keys:
+        try:
+            response = requests.get(
+                "https://www.googleapis.com/youtube/v3/search",
+                params={
+                    "part": "snippet",
+                    "type": "video",
+                    "q": f"{game_name} {TRAILER_SEARCH_SUFFIX}",
+                    "key": api_key,
+                    "maxResults": 1,
+                },
+                timeout=5,
+            )
+            if response.status_code != 200:
+                common.log(
+                    f"YouTube trailer lookup returned status {response.status_code} for '{game_name}'.",
+                    "Trailer",
+                    common.c.YELLOW,
+                )
+                continue
+            search_results = response.json()
+        except (requests.RequestException, json.JSONDecodeError) as exc:
+            common.log(
+                f"YouTube trailer lookup failed for '{game_name}' ({type(exc).__name__}).",
+                "Trailer",
+                common.c.YELLOW,
+            )
+            continue
+
+        video_id = extract_video_id_from_results(search_results)
+        if video_id:
+            return f"[video=https://www.youtube.com/watch?v={video_id}]"
+    return ""
+
+
+def build_trailer(data: dict, game_name: str) -> str:
+    youtube_trailer = fetch_youtube_trailer_for_game(game_name)
+    if youtube_trailer:
+        return youtube_trailer
+    return build_trailer_url(data)
+
+
 def select_game_target() -> tuple[Path, bool]:
     current = Path.cwd().resolve()
     while True:
@@ -496,9 +564,10 @@ def fetch_steam_game_info(app_id: str, release_group: str) -> dict:
         raise RuntimeError("Steam API returned no data for this app id.")
     data = app_data.get("data") or {}
 
+    title = data.get("name") or ""
     info = {
         "appId": app_id,
-        "title": data.get("name") or "",
+        "title": title,
         "headerImage": (data.get("header_image") or f"https://cdn.akamai.steamstatic.com/steam/apps/{app_id}/header.jpg").split("?")[0],
         "type": (data.get("type") or "game").capitalize(),
         "genres": [
@@ -535,7 +604,7 @@ def fetch_steam_game_info(app_id: str, release_group: str) -> dict:
             for shot in (data.get("screenshots") or [])
             if shot.get("path_full")
         ],
-        "trailer": build_trailer_url(data),
+        "trailer": build_trailer(data, title),
     }
     if data.get("drm_notice") and re.search(r"denuvo", data["drm_notice"], re.I) and release_group not in PROTECTION_MAP:
         info["protection"] = "DENUVO & STEAM"
