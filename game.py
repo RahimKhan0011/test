@@ -17,6 +17,7 @@ SKIP_TXT = True
 START_HTTP_SERVER = True
 HTTP_PORT = common.HTTP_PORT
 GAME_CATEGORY = "0"
+EXCLUDED_SELECTION_NAMES = {"__pycache__"}
 
 DEFAULT_IMAGES = {
     "steam": "https://i.postimg.cc/PJjDh09w/steam.png",
@@ -394,14 +395,14 @@ def format_system_requirements(pc_requirements: dict) -> str:
 
 
 def build_trailer_url(data: dict) -> str:
-    def _pick_best_quality_url(source: object) -> str:
-        if not isinstance(source, dict):
+    def _pick_best_quality_url(quality_dict: object) -> str:
+        if not isinstance(quality_dict, dict):
             return ""
-        if isinstance(source.get("max"), str) and source.get("max"):
-            return source["max"]
+        if isinstance(quality_dict.get("max"), str) and quality_dict.get("max"):
+            return quality_dict["max"]
 
         candidates: list[tuple[int, str]] = []
-        for key, value in source.items():
+        for key, value in quality_dict.items():
             if not isinstance(value, str) or not value:
                 continue
             key_score = 0
@@ -437,7 +438,7 @@ def select_game_target() -> tuple[Path, bool]:
         print(f"{common.c.BOLD}{common.c.CYAN}Current directory: {current}{common.c.RESET}")
         items = common.sort_paths_by_mtime([
             p for p in current.iterdir()
-            if p.name != "__pycache__" and has_release_group_match(p.name)
+            if p.name not in EXCLUDED_SELECTION_NAMES and has_release_group_match(p.name)
         ])
         if not items:
             print(f"{common.c.YELLOW}No files/folders matched known game release groups here.{common.c.RESET}")
