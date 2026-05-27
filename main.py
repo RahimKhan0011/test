@@ -982,6 +982,7 @@ def create_torrent(target: Path, include_srt: bool | None = None) -> bool:
 
         _exclude_names = {"screens", "screen", "proof", "screenshots", "screenshot", "sample", "samples"}
         _junk_file_names = {"thumbs.db", "desktop.ini", ".ds_store"}
+        _junk_stem_names = {"junk"}
         for item in target.rglob("*"):
             lower_name = item.name.lower()
             stem_lower = item.stem.lower()
@@ -998,10 +999,9 @@ def create_torrent(target: Path, include_srt: bool | None = None) -> bool:
                 _STEM_SAMPLE_RE.search(stem_lower)
                 or stem_lower in _exclude_names
                 or lower_name in _junk_file_names
-                or "junk" in stem_lower
+                or stem_lower in _junk_stem_names
                 or suffix_lower in _IMAGE_EXTENSIONS
                 or suffix_lower == ".rar"
-                or suffix_lower == ".sfv"
                 or _RAR_VOLUME_RE.search(lower_name)
             ):
                 if rel not in exclude_patterns:
