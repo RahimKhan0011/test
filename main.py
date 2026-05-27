@@ -977,10 +977,12 @@ def create_torrent(target: Path, include_srt: bool | None = None) -> bool:
     exclude_patterns: list[str] = []
     if target.is_dir():
 
-        exclude_patterns.extend(["*.nfo", "*.txt","*.srr"])
+        exclude_patterns.extend(["*.nfo", "*.txt", "*.srr", "*.sfv"])
 
 
         _exclude_names = {"screens", "screen", "proof", "screenshots", "screenshot", "sample", "samples"}
+        _junk_file_names = {"thumbs.db", "desktop.ini", ".ds_store"}
+        _junk_stem_names = {"junk"}
         for item in target.rglob("*"):
             lower_name = item.name.lower()
             stem_lower = item.stem.lower()
@@ -996,6 +998,8 @@ def create_torrent(target: Path, include_srt: bool | None = None) -> bool:
             elif item.is_file() and (
                 _STEM_SAMPLE_RE.search(stem_lower)
                 or stem_lower in _exclude_names
+                or lower_name in _junk_file_names
+                or stem_lower in _junk_stem_names
                 or suffix_lower in _IMAGE_EXTENSIONS
                 or suffix_lower == ".rar"
                 or _RAR_VOLUME_RE.search(lower_name)
