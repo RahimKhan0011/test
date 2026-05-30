@@ -977,7 +977,7 @@ def create_torrent(target: Path, include_srt: bool | None = None) -> bool:
     exclude_patterns: list[str] = []
     if target.is_dir():
 
-        exclude_patterns.extend(["*.nfo", ".nfo", ".*.nfo", "*.txt", "*.srr", "*.sfv"])
+        exclude_patterns.extend(["*.nfo", ".*.nfo", "*.txt", "*.srr", "*.sfv"])
 
 
         _exclude_names = {"screens", "screen", "proof", "screenshots", "screenshot", "sample", "samples"}
