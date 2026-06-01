@@ -968,9 +968,13 @@ def copy_to_clipboard(text: str):
 def list_subtitle_files(target: Path) -> list[Path]:
     if not target.is_dir():
         return []
-    subtitle_files = [f for f in target.rglob("*") if f.is_file() and f.suffix.lower() in SUBTITLE_EXTS]
-    subtitle_files.sort(key=lambda p: p.relative_to(target).as_posix().lower())
-    return subtitle_files
+    subtitle_map: dict[str, Path] = {}
+    for subtitle_file in target.rglob("*.*"):
+        if not subtitle_file.is_file() or subtitle_file.suffix.lower() not in SUBTITLE_EXTS:
+            continue
+        rel = subtitle_file.relative_to(target).as_posix()
+        subtitle_map[rel] = subtitle_file
+    return [subtitle_map[key] for key in sorted(subtitle_map, key=str.lower)]
 
 
 def create_torrent(target: Path, selected_subtitle: Path | None = None) -> bool:
@@ -984,9 +988,18 @@ def create_torrent(target: Path, selected_subtitle: Path | None = None) -> bool:
 
 
     exclude_patterns: list[str] = []
+    exclude_pattern_set: set[str] = set()
+
+    def _add_exclude(pattern: str) -> None:
+        if pattern in exclude_pattern_set:
+            return
+        exclude_patterns.append(pattern)
+        exclude_pattern_set.add(pattern)
+
     if target.is_dir():
 
-        exclude_patterns.extend(["*.nfo", ".*.nfo", "*.txt", "*.srr", "*.sfv"])
+        for _pattern in ("*.nfo", ".*.nfo", "*.txt", "*.srr", "*.sfv"):
+            _add_exclude(_pattern)
 
 
         _exclude_names = {"screens", "screen", "proof", "screenshots", "screenshot", "sample", "samples"}
@@ -1002,8 +1015,7 @@ def create_torrent(target: Path, selected_subtitle: Path | None = None) -> bool:
                 continue
             if item.is_dir() and lower_name in _exclude_names:
                 pattern = f"{rel}/**"
-                if pattern not in exclude_patterns:
-                    exclude_patterns.append(pattern)
+                _add_exclude(pattern)
             elif item.is_file() and (
                 _STEM_SAMPLE_RE.search(stem_lower)
                 or stem_lower in _exclude_names
@@ -1013,8 +1025,7 @@ def create_torrent(target: Path, selected_subtitle: Path | None = None) -> bool:
                 or suffix_lower == ".rar"
                 or _RAR_VOLUME_RE.search(lower_name)
             ):
-                if rel not in exclude_patterns:
-                    exclude_patterns.append(rel)
+                _add_exclude(rel)
 
 
         subtitle_files = list_subtitle_files(target)
@@ -1029,12 +1040,11 @@ def create_torrent(target: Path, selected_subtitle: Path | None = None) -> bool:
                 rel = subtitle_file.relative_to(target).as_posix()
                 if selected_rel and rel == selected_rel:
                     continue
-                if rel not in exclude_patterns:
-                    exclude_patterns.append(rel)
+                _add_exclude(rel)
             if selected_rel:
-                log(f"Including selected subtitle: {Path(selected_rel).name}", "SRT")
+                log(f"Including selected subtitle: {Path(selected_rel).name}", "Subtitle")
             else:
-                log("Excluding subtitle files from torrent.", "SRT")
+                log("Excluding subtitle files from torrent.", "Subtitle")
 
     log("Creating torrent file...", "Torrent")
     out = target.parent / f"{target.name}.torrent"
@@ -2273,7 +2283,7 @@ def main():
     if is_folder:
         _subtitle_files = list_subtitle_files(target_path)
         if _subtitle_files:
-            log(f"Found {len(_subtitle_files)} subtitle file(s) in folder.", "SRT", c.YELLOW)
+            log(f"Found {len(_subtitle_files)} subtitle file(s) in folder.", "Subtitle", c.YELLOW)
             for _idx, _sf in enumerate(_subtitle_files, 1):
                 _rel = _sf.relative_to(target_path).as_posix()
                 print(f"   {c.DIM}{_idx}. {_rel}{c.RESET}")
@@ -2283,11 +2293,13 @@ def main():
                 ).strip()
                 if not _choice:
                     break
-                if _choice.isdigit():
+                try:
                     _pick = int(_choice)
-                    if 1 <= _pick <= len(_subtitle_files):
-                        _selected_subtitle = _subtitle_files[_pick - 1]
-                        break
+                except ValueError:
+                    _pick = 0
+                if 1 <= _pick <= len(_subtitle_files):
+                    _selected_subtitle = _subtitle_files[_pick - 1]
+                    break
                 error("Invalid selection. Enter a valid number or press Enter to skip.")
 
 
