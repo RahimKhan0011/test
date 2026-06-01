@@ -76,6 +76,7 @@ HTTP_PORT = 40452                      # Port for the web app (UI + API endpoint
 VIDEO_EXTS = {'.mkv', '.mp4', '.avi', '.mov', '.m4v', '.webm', '.flv', '.wmv', '.mpg', '.mpeg', '.ts', '.m2ts'}
 AUDIO_EXTS = {'.flac', '.mp3', '.m4a', '.aac', '.ogg', '.opus', '.wav', '.ape', '.wv', '.alac'}
 PDF_EXTS = {'.pdf'}
+SUBTITLE_EXTS = {'.srt', '.ass', '.ssa', '.sub', '.vtt'}
 AUDIO_TRACKLIST_SINGLES_SECTION = "Singles"
 AUDIO_NO_COVER_PLACEHOLDER = "No cover"
 SPECTROGRAM_TITLE_COLOR = "#cddc39"
@@ -964,7 +965,15 @@ def copy_to_clipboard(text: str):
     except:
         pass
 
-def create_torrent(target: Path, include_srt: bool | None = None) -> bool:
+def list_subtitle_files(target: Path) -> list[Path]:
+    if not target.is_dir():
+        return []
+    subtitle_files = [f for f in target.rglob("*") if f.is_file() and f.suffix.lower() in SUBTITLE_EXTS]
+    subtitle_files.sort(key=lambda p: p.relative_to(target).as_posix().lower())
+    return subtitle_files
+
+
+def create_torrent(target: Path, selected_subtitle: Path | None = None) -> bool:
     global GENERATED_TORRENT
     if not CREATE_TORRENT_FILE:
         log("Skipping torrent creation (disabled)", "Skip")
@@ -1008,19 +1017,24 @@ def create_torrent(target: Path, include_srt: bool | None = None) -> bool:
                     exclude_patterns.append(rel)
 
 
-        srt_files = [f for f in target.rglob("*.srt")]
-        if srt_files:
-            if include_srt is None:
-                log(f"Found {len(srt_files)} .srt subtitle file(s) in folder.", "SRT", c.YELLOW)
-                for sf in srt_files[:3]:
-                    print(f"   {c.DIM}{sf.name}{c.RESET}")
-                if len(srt_files) > 3:
-                    print(f"   {c.DIM}...and {len(srt_files) - 3} more{c.RESET}")
-                ans = input(f"\n{c.BOLD}Include .srt files in torrent? [y/N]: {c.RESET}").strip().lower()
-                include_srt = (ans == 'y')
-            if not include_srt:
-                exclude_patterns.append("*.srt")
-                log("Excluding .srt files from torrent.", "SRT")
+        subtitle_files = list_subtitle_files(target)
+        if subtitle_files:
+            selected_rel = None
+            if selected_subtitle is not None:
+                try:
+                    selected_rel = selected_subtitle.relative_to(target).as_posix()
+                except ValueError:
+                    selected_rel = None
+            for subtitle_file in subtitle_files:
+                rel = subtitle_file.relative_to(target).as_posix()
+                if selected_rel and rel == selected_rel:
+                    continue
+                if rel not in exclude_patterns:
+                    exclude_patterns.append(rel)
+            if selected_rel:
+                log(f"Including selected subtitle: {Path(selected_rel).name}", "SRT")
+            else:
+                log("Excluding subtitle files from torrent.", "SRT")
 
     log("Creating torrent file...", "Torrent")
     out = target.parent / f"{target.name}.torrent"
@@ -2255,21 +2269,31 @@ def main():
     print(f"{c.BOLD}{c.PURPLE}Selected → {target_path.name}{c.RESET} {'(Folder Mode)' if is_folder else ''}\n")
 
 
-    _srt_include: bool | None = None
+    _selected_subtitle: Path | None = None
     if is_folder:
-        _srt_check = list(target_path.rglob("*.srt"))
-        if _srt_check:
-            log(f"Found {len(_srt_check)} .srt subtitle file(s) in folder.", "SRT", c.YELLOW)
-            for _sf in _srt_check[:3]:
-                print(f"   {c.DIM}{_sf.name}{c.RESET}")
-            if len(_srt_check) > 3:
-                print(f"   {c.DIM}...and {len(_srt_check) - 3} more{c.RESET}")
-            _srt_include = (input(f"\n{c.BOLD}Include .srt files in torrent? [y/N]: {c.RESET}").strip().lower() == 'y')
+        _subtitle_files = list_subtitle_files(target_path)
+        if _subtitle_files:
+            log(f"Found {len(_subtitle_files)} subtitle file(s) in folder.", "SRT", c.YELLOW)
+            for _idx, _sf in enumerate(_subtitle_files, 1):
+                _rel = _sf.relative_to(target_path).as_posix()
+                print(f"   {c.DIM}{_idx}. {_rel}{c.RESET}")
+            while True:
+                _choice = input(
+                    f"\n{c.BOLD}Select subtitle number to include (Enter to skip all): {c.RESET}"
+                ).strip()
+                if not _choice:
+                    break
+                if _choice.isdigit():
+                    _pick = int(_choice)
+                    if 1 <= _pick <= len(_subtitle_files):
+                        _selected_subtitle = _subtitle_files[_pick - 1]
+                        break
+                error("Invalid selection. Enter a valid number or press Enter to skip.")
 
 
     _torrent_result: list[bool] = [False]
     def _torrent_worker():
-        _torrent_result[0] = create_torrent(target_path, _srt_include)
+        _torrent_result[0] = create_torrent(target_path, _selected_subtitle)
     _torrent_thread = threading.Thread(target=_torrent_worker, daemon=True, name="torrent-creator")
     _torrent_thread.start()
 
