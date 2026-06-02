@@ -7,6 +7,7 @@ import subprocess
 import re
 import requests
 import concurrent.futures
+import time
 from pathlib import Path
 from datetime import datetime
 import secrets
@@ -62,6 +63,8 @@ MAX_CONCURRENT_UPLOADS = 16        # Hard cap to avoid overwhelming the host/API
 MIN_IO_WORKERS = 4                 # Baseline for network-bound uploads
 IO_WORKER_MULTIPLIER = 2           # Modest multiplier over CPU count for I/O tasks
 UPLOAD_TIMEOUT = 90                # Balanced timeout: allows slow hosts while still limiting stalls
+UPLOAD_RETRIES = 3                 # Retry transient upload failures per host
+UPLOAD_RETRY_BACKOFF = 1.5         # Seconds; exponential backoff base between retries
 
 # --- AUTO DELETE SETTINGS ---
 # If True, deletes the generated .torrent (and .txt if created) when the script closes.
@@ -1584,6 +1587,8 @@ def _upload_via_host(img: Path, host: str, timeout: int = UPLOAD_TIMEOUT) -> tup
                     if data.get("success") and image_url:
                         return image_url, False
                     error(f"imgbb upload failed for {filename}: {_parse_upload_error_message(data)}")
+                else:
+                    error(f"imgbb upload failed for {filename}: HTTP {r.status_code}")
         elif host == "freeimage":
             encoded_name = quote(filename, safe="")
             with img.open("rb") as fh:
@@ -1599,6 +1604,8 @@ def _upload_via_host(img: Path, host: str, timeout: int = UPLOAD_TIMEOUT) -> tup
                     if data.get("status_code") == 200 and data.get("image", {}).get("url"):
                         return data["image"]["url"], False
                     error(f"freeimage upload failed for {filename}: {_parse_upload_error_message(data)}")
+                else:
+                    error(f"freeimage upload failed for {filename}: HTTP {r.status_code}")
     except json.JSONDecodeError as exc:
         error(f"{host} upload failed for {filename}: invalid JSON response ({exc})")
     except requests.RequestException as exc:
@@ -1618,10 +1625,15 @@ def upload_image(img: Path) -> str | None:
 
         hosts = [primary] + [h for h in supported_hosts if h != primary]
 
-    for idx, host in enumerate(hosts):
-        url, fatal = _upload_via_host(img, host)
-        if url:
-            return url
+    for host in hosts:
+        for attempt in range(1, max(1, UPLOAD_RETRIES) + 1):
+            url, fatal = _upload_via_host(img, host)
+            if url:
+                return url
+            if fatal:
+                break
+            if attempt < max(1, UPLOAD_RETRIES):
+                time.sleep(UPLOAD_RETRY_BACKOFF ** attempt)
         if fatal:
             break
     return None
@@ -2601,7 +2613,7 @@ def main():
             try: f.unlink()
             except: pass
 
-        ss_bbcode = "\n".join([f"[img]{u}[/img]" for u in uploaded_direct_urls])
+        ss_bbcode = "\n".join([f"[img]{u}[/img]" for u in uploaded_direct_urls]) if uploaded_direct_urls else "Screenshots not available."
         description = f"[center][b][size=5][color=#59E817][font=Oswald]MediaInfo[/color][/size][/b][/center][b][/font][mediainfo]\n{mediainfo_text}[/mediainfo]\n[center][/b][b][size=5][color=#59E817][font=Oswald]Screenshots[/color][/size][/b][/center]\n[center]\n{ss_bbcode}[/center][/font]"
 
         if not SKIP_TXT:
