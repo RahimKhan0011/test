@@ -1618,6 +1618,7 @@ def _upload_via_host(img: Path, host: str, timeout: int = UPLOAD_TIMEOUT) -> tup
 def upload_image(img: Path) -> str | None:
     primary = _DEPRECATED_HOST_ALIASES.get(IMAGE_HOST.lower(), IMAGE_HOST.lower())
     supported_hosts = ("imgbb", "freeimage")
+    retry_count = UPLOAD_RETRIES if UPLOAD_RETRIES > 0 else 1
     if primary not in supported_hosts:
         error(f"Unsupported IMAGE_HOST '{primary}', defaulting to supported hosts")
         hosts = list(supported_hosts)
@@ -1626,13 +1627,13 @@ def upload_image(img: Path) -> str | None:
         hosts = [primary] + [h for h in supported_hosts if h != primary]
 
     for host in hosts:
-        for attempt in range(1, max(1, UPLOAD_RETRIES) + 1):
+        for attempt in range(1, retry_count + 1):
             url, fatal = _upload_via_host(img, host)
             if url:
                 return url
             if fatal:
                 break
-            if attempt < max(1, UPLOAD_RETRIES):
+            if attempt < retry_count:
                 time.sleep(UPLOAD_RETRY_BACKOFF ** attempt)
         if fatal:
             break
