@@ -1450,8 +1450,7 @@ def _build_screenshot_cmd(video: Path, timestamp: float, output_file: Path, hdr_
     if crop:
         cmd += ["-vf", f"crop={crop}"]
     if hdr_dv:
-
-        cmd += ["-frames:v", "1", "-update", "1", "-q:v", "1"]
+        cmd += ["-frames:v", "1", "-q:v", "1"]
     else:
         cmd += ["-vframes", "1", "-q:v", "1"]
     cmd += ["-y", str(output_file)]
