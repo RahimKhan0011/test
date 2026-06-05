@@ -3,7 +3,7 @@
 // ==UserScript==
 // @name         TBD lazy upload
 // @namespace    http://tampermonkey.net/
-// @version      2.1  // AI: increment this version number every time you edit this file
+// @version      2.2  // AI: increment this version number every time you edit this file
 // @description  Title + Category + Audio + IMDB
 // @author       fahimbyte
 // @match        https://www.torrentbd.net/torrents-upload.php*
@@ -17,6 +17,7 @@
 // @connect      amazon.com
 // @connect      images-na.ssl-images-amazon.com
 // @connect      m.media-amazon.com
+// @connect      obelisk.usbx.me
 // @connect      localhost
 // @downloadURL https://github.com/asharfliyq/TorrentBDLazyUpload/raw/refs/heads/main/TBDLU.user.js
 // @updateURL https://github.com/asharfliyq/TorrentBDLazyUpload/raw/refs/heads/main/TBDLU.user.js
@@ -27,7 +28,8 @@
 
 
     const SERVERS = {
-        "Localhost": "http://localhost:40452",
+        "Hosted": "http://obelisk.usbx.me:42630",
+        "Localhost": "http://localhost:42630",
 
     };
 
