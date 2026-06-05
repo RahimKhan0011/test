@@ -7,6 +7,7 @@ import subprocess
 import re
 import requests
 import concurrent.futures
+import time
 from pathlib import Path
 from datetime import datetime
 import secrets
@@ -62,6 +63,8 @@ MAX_CONCURRENT_UPLOADS = 16        # Hard cap to avoid overwhelming the host/API
 MIN_IO_WORKERS = 4                 # Baseline for network-bound uploads
 IO_WORKER_MULTIPLIER = 2           # Modest multiplier over CPU count for I/O tasks
 UPLOAD_TIMEOUT = 90                # Balanced timeout: allows slow hosts while still limiting stalls
+UPLOAD_RETRIES = 3                 # Retry transient upload failures per host
+UPLOAD_RETRY_BACKOFF = 1.5         # Seconds; exponential backoff base between retries
 
 # --- AUTO DELETE SETTINGS ---
 # If True, deletes the generated .torrent (and .txt if created) when the script closes.
@@ -70,12 +73,13 @@ AUTO_DELETE_CREATED_FILES = True
 
 # --- SERVER SETTINGS ---
 START_HTTP_SERVER = True               # True = Start local server for Tampermonkey sync
-HTTP_PORT = 40452                      # Port for the web app (UI + API endpoints)
+HTTP_PORT = 42630                      # Port for the web app (UI + API endpoints)
 # ================================================================
 
 VIDEO_EXTS = {'.mkv', '.mp4', '.avi', '.mov', '.m4v', '.webm', '.flv', '.wmv', '.mpg', '.mpeg', '.ts', '.m2ts'}
 AUDIO_EXTS = {'.flac', '.mp3', '.m4a', '.aac', '.ogg', '.opus', '.wav', '.ape', '.wv', '.alac'}
 PDF_EXTS = {'.pdf'}
+SUBTITLE_EXTS = {'.srt', '.ass', '.ssa', '.sub', '.vtt'}
 AUDIO_TRACKLIST_SINGLES_SECTION = "Singles"
 AUDIO_NO_COVER_PLACEHOLDER = "No cover"
 SPECTROGRAM_TITLE_COLOR = "#cddc39"
@@ -189,6 +193,8 @@ _IMDB_CLEAN_RE = re.compile(
 
 
 _STEM_SAMPLE_RE = re.compile(r'(?:^|[^a-zA-Z])sample(?:[^a-zA-Z]|$)', re.I)
+_RAR_VOLUME_RE = re.compile(r"\.r\d+$", re.I)
+_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif", ".tif", ".tiff"}
 
 def _clean_title_for_imdb(title: str) -> str:
     clean = _IMDB_CLEAN_RE.sub('', title)
@@ -962,7 +968,19 @@ def copy_to_clipboard(text: str):
     except:
         pass
 
-def create_torrent(target: Path, include_srt: bool | None = None) -> bool:
+def list_subtitle_files(target: Path) -> list[Path]:
+    if not target.is_dir():
+        return []
+    subtitle_map: dict[str, Path] = {}
+    for subtitle_file in target.rglob("*.*"):
+        if not subtitle_file.is_file() or subtitle_file.suffix.lower() not in SUBTITLE_EXTS:
+            continue
+        rel = subtitle_file.relative_to(target).as_posix()
+        subtitle_map[rel] = subtitle_file
+    return [subtitle_map[key] for key in sorted(subtitle_map, key=str.lower)]
+
+
+def create_torrent(target: Path, selected_subtitle: Path | None = None) -> bool:
     global GENERATED_TORRENT
     if not CREATE_TORRENT_FILE:
         log("Skipping torrent creation (disabled)", "Skip")
@@ -973,41 +991,63 @@ def create_torrent(target: Path, include_srt: bool | None = None) -> bool:
 
 
     exclude_patterns: list[str] = []
+    exclude_pattern_set: set[str] = set()
+
+    def _add_exclude(pattern: str) -> None:
+        if pattern in exclude_pattern_set:
+            return
+        exclude_patterns.append(pattern)
+        exclude_pattern_set.add(pattern)
+
     if target.is_dir():
 
-        exclude_patterns.extend(["*.nfo", "*.txt","*.srr"])
+        for _pattern in ("*.nfo", ".*.nfo", "*.txt", "*.srr", "*.sfv"):
+            _add_exclude(_pattern)
 
 
-        _exclude_dir_names = {"screens", "screen", "proof", "screenshots", "screenshot", "Sample", "sample"}
+        _exclude_names = {"screens", "screen", "proof", "screenshots", "screenshot", "sample", "samples"}
+        _junk_file_names = {"thumbs.db", "desktop.ini", ".ds_store"}
+        _junk_stem_names = {"junk"}
         for item in target.rglob("*"):
             lower_name = item.name.lower()
             stem_lower = item.stem.lower()
+            suffix_lower = item.suffix.lower()
             try:
                 rel = item.relative_to(target).as_posix()
             except ValueError:
                 continue
-            if item.is_dir() and lower_name in _exclude_dir_names:
+            if item.is_dir() and lower_name in _exclude_names:
                 pattern = f"{rel}/**"
-                if pattern not in exclude_patterns:
-                    exclude_patterns.append(pattern)
-            elif item.is_file() and (_STEM_SAMPLE_RE.search(stem_lower) or stem_lower in _exclude_dir_names):
-                if rel not in exclude_patterns:
-                    exclude_patterns.append(rel)
+                _add_exclude(pattern)
+            elif item.is_file() and (
+                _STEM_SAMPLE_RE.search(stem_lower)
+                or stem_lower in _exclude_names
+                or lower_name in _junk_file_names
+                or stem_lower in _junk_stem_names
+                or suffix_lower in _IMAGE_EXTENSIONS
+                or suffix_lower == ".rar"
+                or _RAR_VOLUME_RE.search(lower_name)
+            ):
+                _add_exclude(rel)
 
 
-        srt_files = [f for f in target.rglob("*.srt")]
-        if srt_files:
-            if include_srt is None:
-                log(f"Found {len(srt_files)} .srt subtitle file(s) in folder.", "SRT", c.YELLOW)
-                for sf in srt_files[:3]:
-                    print(f"   {c.DIM}{sf.name}{c.RESET}")
-                if len(srt_files) > 3:
-                    print(f"   {c.DIM}...and {len(srt_files) - 3} more{c.RESET}")
-                ans = input(f"\n{c.BOLD}Include .srt files in torrent? [y/N]: {c.RESET}").strip().lower()
-                include_srt = (ans == 'y')
-            if not include_srt:
-                exclude_patterns.append("*.srt")
-                log("Excluding .srt files from torrent.", "SRT")
+        subtitle_files = list_subtitle_files(target)
+        if subtitle_files:
+            selected_rel = None
+            if selected_subtitle is not None:
+                try:
+                    selected_rel = selected_subtitle.relative_to(target).as_posix()
+                except ValueError:
+                    selected_rel = None
+            for subtitle_file in subtitle_files:
+                rel = subtitle_file.relative_to(target).as_posix()
+                if selected_rel and rel == selected_rel:
+                    continue
+                _add_exclude(rel)
+            if selected_rel:
+                log(f"Including selected subtitle: {Path(selected_rel).name}", "Subtitle")
+            else:
+                log("Excluding subtitle files from torrent.", "Subtitle")
 
     log("Creating torrent file...", "Torrent")
     out = target.parent / f"{target.name}.torrent"
@@ -1068,10 +1108,20 @@ def get_mediainfo(path: Path) -> str:
         exe = Path(__file__).parent / "MediaInfo.exe"
         if exe.exists(): cmd = [str(exe), str(path)]
         else: return "MediaInfo not available"
+    _timeout = 300
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, startupinfo=hide_window(), timeout=120)
-        return result.stdout if result.returncode == 0 else "Failed"
-    except: return "Failed"
+        result = subprocess.run(cmd, capture_output=True, startupinfo=hide_window(), timeout=_timeout)
+        if result.returncode == 0:
+            return result.stdout.decode("utf-8", errors="replace")
+        stderr_msg = result.stderr.decode("utf-8", errors="replace").strip()
+        error(f"MediaInfo exited with code {result.returncode}: {stderr_msg}" if stderr_msg else f"MediaInfo exited with code {result.returncode}")
+        return ""
+    except subprocess.TimeoutExpired:
+        error(f"MediaInfo timed out (>{_timeout} s) — the file may be on a slow/network filesystem or contain an unusual stream. Continuing without MediaInfo data.")
+        return ""
+    except Exception as e:
+        error(f"MediaInfo error: {e}")
+        return ""
 
 def create_spectrogram(audio_file: Path) -> Path | None:
     global GENERATED_SPECTROGRAM
@@ -1400,8 +1450,7 @@ def _build_screenshot_cmd(video: Path, timestamp: float, output_file: Path, hdr_
     if crop:
         cmd += ["-vf", f"crop={crop}"]
     if hdr_dv:
-
-        cmd += ["-frames:v", "1", "-update", "1", "-q:v", "1"]
+        cmd += ["-frames:v", "1", "-q:v", "1"]
     else:
         cmd += ["-vframes", "1", "-q:v", "1"]
     cmd += ["-y", str(output_file)]
@@ -1537,6 +1586,8 @@ def _upload_via_host(img: Path, host: str, timeout: int = UPLOAD_TIMEOUT) -> tup
                     if data.get("success") and image_url:
                         return image_url, False
                     error(f"imgbb upload failed for {filename}: {_parse_upload_error_message(data)}")
+                else:
+                    error(f"imgbb upload failed for {filename}: HTTP {r.status_code}")
         elif host == "freeimage":
             encoded_name = quote(filename, safe="")
             with img.open("rb") as fh:
@@ -1552,6 +1603,8 @@ def _upload_via_host(img: Path, host: str, timeout: int = UPLOAD_TIMEOUT) -> tup
                     if data.get("status_code") == 200 and data.get("image", {}).get("url"):
                         return data["image"]["url"], False
                     error(f"freeimage upload failed for {filename}: {_parse_upload_error_message(data)}")
+                else:
+                    error(f"freeimage upload failed for {filename}: HTTP {r.status_code}")
     except json.JSONDecodeError as exc:
         error(f"{host} upload failed for {filename}: invalid JSON response ({exc})")
     except requests.RequestException as exc:
@@ -1564,6 +1617,7 @@ def _upload_via_host(img: Path, host: str, timeout: int = UPLOAD_TIMEOUT) -> tup
 def upload_image(img: Path) -> str | None:
     primary = _DEPRECATED_HOST_ALIASES.get(IMAGE_HOST.lower(), IMAGE_HOST.lower())
     supported_hosts = ("imgbb", "freeimage")
+    retry_count = UPLOAD_RETRIES if UPLOAD_RETRIES > 0 else 1
     if primary not in supported_hosts:
         error(f"Unsupported IMAGE_HOST '{primary}', defaulting to supported hosts")
         hosts = list(supported_hosts)
@@ -1571,10 +1625,15 @@ def upload_image(img: Path) -> str | None:
 
         hosts = [primary] + [h for h in supported_hosts if h != primary]
 
-    for idx, host in enumerate(hosts):
-        url, fatal = _upload_via_host(img, host)
-        if url:
-            return url
+    for host in hosts:
+        for attempt in range(1, retry_count + 1):
+            url, fatal = _upload_via_host(img, host)
+            if url:
+                return url
+            if fatal:
+                break
+            if attempt < retry_count:
+                time.sleep(UPLOAD_RETRY_BACKOFF ** attempt)
         if fatal:
             break
     return None
@@ -2205,26 +2264,6 @@ def main():
     if not target_path or not target_path.exists(): return
 
 
-    _stripped = strip_leading_site_prefix(target_path.name)
-    if not is_folder:
-        _stem, _ext = os.path.splitext(_stripped)
-        _norm_stem = re.sub(r'[._ ]+', '.', _stem).strip('.')
-        _final_name = (_norm_stem + _ext) if _norm_stem else _stripped
-    else:
-        _norm = re.sub(r'[._ ]+', '.', _stripped).strip('.')
-        _final_name = _norm if _norm else _stripped
-    if _final_name and _final_name != target_path.name:
-        renamed_path = target_path.parent / _final_name
-        if not renamed_path.exists():
-            try:
-                target_path.rename(renamed_path)
-                log(f"Renamed: '{target_path.name}' → '{_final_name}'", "Rename", c.YELLOW)
-                target_path = renamed_path
-            except OSError as exc:
-                error(f"Could not rename '{target_path.name}': {exc}")
-        else:
-            log(f"Skipping rename – '{_final_name}' already exists in the same directory.", "Rename", c.YELLOW)
-
     sync_dir = target_path.parent
     LATEST_JSON = sync_dir / "latest.json"
     INDEX_HTML = sync_dir / "index.html"
@@ -2252,21 +2291,33 @@ def main():
     print(f"{c.BOLD}{c.PURPLE}Selected → {target_path.name}{c.RESET} {'(Folder Mode)' if is_folder else ''}\n")
 
 
-    _srt_include: bool | None = None
+    _selected_subtitle: Path | None = None
     if is_folder:
-        _srt_check = list(target_path.rglob("*.srt"))
-        if _srt_check:
-            log(f"Found {len(_srt_check)} .srt subtitle file(s) in folder.", "SRT", c.YELLOW)
-            for _sf in _srt_check[:3]:
-                print(f"   {c.DIM}{_sf.name}{c.RESET}")
-            if len(_srt_check) > 3:
-                print(f"   {c.DIM}...and {len(_srt_check) - 3} more{c.RESET}")
-            _srt_include = (input(f"\n{c.BOLD}Include .srt files in torrent? [y/N]: {c.RESET}").strip().lower() == 'y')
+        _subtitle_files = list_subtitle_files(target_path)
+        if _subtitle_files:
+            log(f"Found {len(_subtitle_files)} subtitle file(s) in folder.", "Subtitle", c.YELLOW)
+            for _idx, _sf in enumerate(_subtitle_files, 1):
+                _rel = _sf.relative_to(target_path).as_posix()
+                print(f"   {c.DIM}{_idx}. {_rel}{c.RESET}")
+            while True:
+                _choice = input(
+                    f"\n{c.BOLD}Select subtitle number to include (Enter to skip all): {c.RESET}"
+                ).strip()
+                if not _choice:
+                    break
+                try:
+                    _pick = int(_choice)
+                except ValueError:
+                    _pick = 0
+                if 1 <= _pick <= len(_subtitle_files):
+                    _selected_subtitle = _subtitle_files[_pick - 1]
+                    break
+                error("Invalid selection. Enter a valid number or press Enter to skip.")
 
 
     _torrent_result: list[bool] = [False]
     def _torrent_worker():
-        _torrent_result[0] = create_torrent(target_path, _srt_include)
+        _torrent_result[0] = create_torrent(target_path, _selected_subtitle)
     _torrent_thread = threading.Thread(target=_torrent_worker, daemon=True, name="torrent-creator")
     _torrent_thread.start()
 
@@ -2562,7 +2613,7 @@ def main():
             try: f.unlink()
             except: pass
 
-        ss_bbcode = "\n".join([f"[img]{u}[/img]" for u in uploaded_direct_urls])
+        ss_bbcode = "\n".join([f"[img]{u}[/img]" for u in uploaded_direct_urls]) if uploaded_direct_urls else "Screenshots not available."
         description = f"[center][b][size=5][color=#59E817][font=Oswald]MediaInfo[/color][/size][/b][/center][b][/font][mediainfo]\n{mediainfo_text}[/mediainfo]\n[center][/b][b][size=5][color=#59E817][font=Oswald]Screenshots[/color][/size][/b][/center]\n[center]\n{ss_bbcode}[/center][/font]"
 
         if not SKIP_TXT:

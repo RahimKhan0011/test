@@ -1,0 +1,1909 @@
+#!/usr/bin/env python3
+
+from __future__ import annotations
+
+import argparse
+import atexit
+import concurrent.futures
+import json
+import os
+import re
+import shutil
+import string
+import subprocess
+import sys
+import threading
+import time
+from datetime import datetime
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from math import gcd
+from pathlib import Path
+from urllib.parse import parse_qs, quote, unquote, urlparse
+
+import requests
+
+
+# ========================= CONFIGURATION =========================
+
+# --- API Keys ---
+IMGBB_API_KEY     = "c68b06c4f7daabb90d696eafa1f25a5c"   # https://api.imgbb.com/
+FREEIMAGE_API_KEY = "6d207e02198a847aa98d0a2a901485a5"
+
+# --- Image host ---
+IMAGE_HOST = "imgbb"   # "imgbb" or "freeimage"
+
+# --- Screenshot settings ---
+LOSSLESS_SCREENSHOT = True                             # PNG when True, JPEG when False
+FRAME_PERCENTS      = [0.20, 0.40, 0.50, 0.60, 0.80]  # 5 frames at these %s
+
+# --- Torrent settings ---
+CREATE_TORRENT_FILE = True
+TRACKER_ANNOUNCE    = "https://tracker.torrentbd.net/announce"
+PRIVATE_TORRENT     = True
+
+# --- Torrent comment settings (new) ---
+ADD_TORRENT_COMMENT = False   # Set True to embed a comment in the torrent
+TORRENT_COMMENT     = ""      # The comment text (used when ADD_TORRENT_COMMENT is True)
+
+# --- Output ---
+SKIP_TXT          = True    # Do not save description to a .txt file
+COPY_TO_CLIPBOARD = True    # Copy description to system clipboard
+
+# --- Upload concurrency ---
+MAX_CONCURRENT_UPLOADS = 16
+MIN_IO_WORKERS         = 4
+IO_WORKER_MULTIPLIER   = 2
+UPLOAD_TIMEOUT         = 90  # seconds per upload
+
+# --- Auto-delete: delete only files *this script* created ---
+AUTO_DELETE_CREATED_FILES = True
+
+# --- Web server ---
+START_HTTP_SERVER = True
+HTTP_PORT         = 40482   # different port from main.py
+
+# =================================================================
+
+VIDEO_EXTS = {
+    ".mkv", ".mp4", ".avi", ".mov", ".m4v", ".webm",
+    ".flv", ".wmv", ".mpg", ".mpeg", ".ts", ".m2ts",
+}
+_STEM_SAMPLE_RE = re.compile(r"(?:^|[^a-zA-Z])sample(?:[^a-zA-Z]|$)", re.I)
+_RAR_VOLUME_RE = re.compile(r"\.r\d+$", re.I)
+_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif", ".tif", ".tiff"}
+
+_FILENAME_SERVICES = [
+    "AMZN", "NF", "VIKI", "AHA", "SNXT", "KCW", "DSNP", "ATV", "JHS", "WTV",
+    "HULU", "ATVP", "HMAX", "PCOK", "PMTP", "STAN", "CRAV", "MUBI", "CC",
+    "CR", "FUNI", "HTSR", "HS", "iP", "ALL4", "iT", "BBC", "NOW",
+]
+
+
+# ========================= CONSOLE COLOURS =========================
+
+class c:
+    RESET  = "\033[0m"
+    BOLD   = "\033[1m"
+    DIM    = "\033[2m"
+    PURPLE = "\033[95m"
+    CYAN   = "\033[96m"
+    GREEN  = "\033[92m"
+    YELLOW = "\033[93m"
+    RED    = "\033[91m"
+    GRAY   = "\033[90m"
+    WHITE  = "\033[97m"
+
+
+# ========================= GLOBAL STATE =========================
+
+# Track every file this script creates so we can delete them on exit
+_GENERATED_FILES:   list[Path] = []
+_GENERATED_TORRENT: Path | None = None
+
+# Shared web-server state (set after processing)
+_WEBAPP_HTML:             str        = ""
+_UPLOADED_ENCODED_URLS:   list[str]  = []
+_COMPARISON_SS_PATHS:     list[Path] = []
+_ENCODED_SS_PATHS:        list[Path] = []
+
+_SERVER_READY      = threading.Event()
+_HTTP_STARTED      = False
+_HTTP_STARTED_LOCK = threading.Lock()
+
+_log_lock = threading.Lock()
+
+
+# ========================= LOGGING =========================
+
+def log(msg: str, icon: str = "-", color: str = c.CYAN) -> None:
+    t = datetime.now().strftime("%H:%M:%S")
+    with _log_lock:
+        print(f"{color}[{t}] {icon} {msg}{c.RESET}", flush=True)
+
+
+def success(msg: str) -> None:
+    log(msg, "OK", c.GREEN)
+
+
+def error(msg: str) -> None:
+    log(msg, "ERR", c.RED)
+
+
+def banner() -> None:
+    os.system("cls" if os.name == "nt" else "clear")
+    print(
+        f"{c.PURPLE}{c.BOLD}"
+        "╔══════════════════════════════════════════════════════════════════╗\n"
+        "║          Encode Comparison & Upload Tool  (encode.py)           ║\n"
+        "║    By fahimbyte (https://github.com/mazidulmahim)               ║\n"
+        "╚══════════════════════════════════════════════════════════════════╝"
+        f"{c.RESET}"
+    )
+
+
+def copy_to_clipboard(text: str) -> None:
+    if not COPY_TO_CLIPBOARD:
+        return
+    try:
+        if os.name == "nt":
+            subprocess.run("clip", input=text.encode("utf-8"), check=True, capture_output=True)
+        elif sys.platform == "darwin":
+            subprocess.run("pbcopy", input=text.encode("utf-8"), check=True, capture_output=True)
+        else:
+            subprocess.run(
+                ["xclip", "-selection", "clipboard"],
+                input=text.encode("utf-8"), check=True, capture_output=True,
+            )
+        success("Description copied to clipboard!")
+    except Exception:
+        pass
+
+
+def hide_window():
+    if os.name == "nt":
+        si = subprocess.STARTUPINFO()
+        si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        si.wShowWindow = 0
+        return si
+    return None
+
+
+def _ffprobe_exe() -> str:
+    """Return the absolute path to ffprobe by re-querying PATH each call.
+
+    This ensures a newly installed ffmpeg is picked up without restarting
+    Python, by resolving the binary location from the system PATH each time.
+    """
+    return shutil.which("ffprobe") or "ffprobe"
+
+
+def _ffmpeg_exe() -> str:
+    """Return the absolute path to ffmpeg by re-querying PATH each call."""
+    return shutil.which("ffmpeg") or "ffmpeg"
+
+
+# ========================= OWN STRIP / TITLE LOGIC =========================
+
+_TECH_TAGS_PAT = (
+    r"2160p|1080p|720p|480p"
+    r"|WEB-DL|WEBRip|BluRay|REMUX|HDTV"
+    + "|" + "|".join(re.escape(s) for s in _FILENAME_SERVICES)
+    + r"|x264|x265|H\.264|H\.265|HEVC|AVC|AV1|VP9"
+    r"|DD\+\d|DDP\d|DD\d|DDP|TrueHD|DTS|AAC|FLAC|Opus"
+    r"|HDR10\+|HDR10|HDR|HLG|DV"
+    r"|REPACK|PROPER|INTERNAL|UHD"
+)
+_FIRST_TECH_TAG_RE = re.compile(
+    rf"(?:^|[.\-_\s])({_TECH_TAGS_PAT})(?:[.\-_\s]|$)", re.I
+)
+
+
+def _strip_leading_site(name: str) -> str:
+    return re.sub(
+        r"^\s*(?:https?://)?www\.(?:[A-Za-z0-9-]+\.)+[A-Za-z]{{2,}}\s*[-–—:|]\s*",
+        "",
+        name, count=1, flags=re.I,
+    )
+
+
+def _extract_show_title(filename: str) -> str:
+    stem = Path(filename).stem
+    stem = re.sub(
+        r"^\s*(?:https?://)?www\.(?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,}\s*[-–—:|]\s*",
+        "",
+        stem, count=1, flags=re.I,
+    )
+    m = _FIRST_TECH_TAG_RE.search(stem)
+    title_part = stem[:m.start(1)] if m else stem
+    title_part = title_part.strip(".-_ ")
+    # Convert dots/underscores/dashes to spaces
+    title_part = re.sub(r"[._]", " ", title_part).strip()
+    return title_part if title_part else stem
+
+
+def strip_p2p_name(filename: str) -> str:
+    stem = Path(filename).stem
+    stem = re.sub(
+        r"^\s*(?:https?://)?www\.(?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,}\s*[-–—:|]\s*",
+        "",
+        stem, count=1, flags=re.I,
+    )
+    m = _FIRST_TECH_TAG_RE.search(stem)
+    if not m:
+        return stem
+    start = m.start(1)
+    return stem[start:].strip(".-_ ")
+
+
+# ========================= MEDIAINFO =========================
+
+def get_mediainfo_text(path: Path) -> str:
+    cmd = ["mediainfo", str(path)]
+    if not shutil.which("mediainfo"):
+        exe = Path(__file__).parent / "MediaInfo.exe"
+        if exe.exists():
+            cmd = [str(exe), str(path)]
+        else:
+            return "MediaInfo not available"
+    try:
+        result = subprocess.run(
+            cmd, capture_output=True, startupinfo=hide_window(), timeout=300,
+        )
+        if result.returncode == 0:
+            return result.stdout.decode("utf-8", errors="replace")
+        return ""
+    except Exception as exc:
+        error(f"MediaInfo error: {exc}")
+        return ""
+
+
+def get_mediainfo_json(path: Path) -> dict:
+    try:
+        r = subprocess.run(
+            ["mediainfo", "--Output=JSON", str(path)],
+            capture_output=True, text=True, timeout=120,
+        )
+        if r.stdout:
+            return json.loads(r.stdout)
+    except Exception as exc:
+        error(f"MediaInfo JSON error: {exc}")
+    return {}
+
+
+def trim_mediainfo_path(text: str, base_dir: Path) -> str:
+    pfx_posix   = str(base_dir).replace("\\", "/").rstrip("/") + "/"
+    pfx_windows = str(base_dir).replace("/", "\\").rstrip("\\") + "\\"
+
+    def _replace(m: re.Match) -> str:
+        label, full = m.group(1), m.group(2).strip()
+        if full.startswith(pfx_posix):
+            return label + full[len(pfx_posix):]
+        if full.startswith(pfx_windows):
+            return label + full[len(pfx_windows):]
+        return m.group(0)
+
+    return re.sub(
+        r"(^\s*Complete name\s*:\s*)([^\r\n]+)",
+        _replace, text or "", flags=re.MULTILINE,
+    )
+
+
+# ========================= VALUE FORMATTERS =========================
+
+def _safe_int(val, default: int = 0) -> int:
+    try:
+        m = re.search(r"-?\d+", str(val).split("/")[0].strip())
+        return int(m.group(0)) if m else default
+    except (ValueError, TypeError):
+        return default
+
+
+def _safe_float(val, default: float = 0.0) -> float:
+    try:
+        return float(str(val).split("/")[0].strip())
+    except (ValueError, TypeError):
+        return default
+
+
+def fmt_filesize(size_bytes: int) -> str:
+    if size_bytes >= 1 << 30:
+        return f"{size_bytes / (1 << 30):.2f} GiB  ({size_bytes:,} bytes)"
+    if size_bytes >= 1 << 20:
+        return f"{size_bytes / (1 << 20):.2f} MiB  ({size_bytes:,} bytes)"
+    if size_bytes >= 1 << 10:
+        return f"{size_bytes / (1 << 10):.2f} KiB  ({size_bytes:,} bytes)"
+    return f"{size_bytes} bytes"
+
+
+def fmt_size_gb(size_bytes: int) -> str:
+    return f"{size_bytes / (1 << 30):.2f} GB"
+
+
+def fmt_duration(seconds: float) -> str:
+    h, rem = divmod(int(seconds), 3600)
+    m, s   = divmod(rem, 60)
+    if h:
+        return f"{h}h {m:02d}m {s:02d}s"
+    return f"{m}m {s:02d}s"
+
+
+def fmt_bitrate(bps: float) -> str:
+    if bps >= 1_000_000:
+        return f"{bps / 1_000_000:.2f} Mbps"
+    if bps >= 1_000:
+        return f"{bps / 1_000:.0f} Kbps"
+    return f"{bps:.0f} bps"
+
+
+def resolution_label(width: int, height: int) -> str:
+    if width >= 3800 or height >= 2100:
+        return "2160p"
+    if width >= 1900 or height >= 1000:
+        return "1080p"
+    if width >= 1200 or height >= 700:
+        return "720p"
+    if width >= 640 or height >= 470:
+        return "480p"
+    return f"{height}p" if height else "N/A"
+
+
+def aspect_ratio(width: int, height: int) -> str:
+    if not width or not height:
+        return ""
+    r = width / height
+    for label, ref, tol in [
+        ("16:9",   16 / 9,  0.05),
+        ("4:3",    4 / 3,   0.05),
+        ("21:9",   21 / 9,  0.07),
+        ("1.85:1", 1.85,    0.03),
+        ("2.35:1", 2.35,    0.03),
+        ("2.39:1", 2.39,    0.03),
+    ]:
+        if abs(r - ref) < tol:
+            return label
+    g = gcd(width, height)
+    return f"{width // g}:{height // g}"
+
+
+def video_codec_display(fmt: str) -> str:
+    u = fmt.upper()
+    if "AVC"   in u or "H.264" in u: return "H.264 (AVC)"
+    if "HEVC"  in u or "H.265" in u: return "H.265 (HEVC)"
+    if "AV1"   in u:                 return "AV1"
+    if "VP9"   in u:                 return "VP9"
+    if "VC-1"  in u:                 return "VC-1"
+    return fmt
+
+
+def audio_codec_display(fmt: str, profile: str = "", commercial: str = "") -> str:
+    u = fmt.upper()
+    if u.startswith("E-AC-3") or u.startswith("EAC3"):
+        return "DDP (E-AC-3)"
+    if u.startswith("AC-3") or u == "AC3":
+        return "DD (AC-3)"
+    if u == "MLP FBA" or "TRUEHD" in u:
+        return "TrueHD"
+    if u.startswith("DTS"):
+        p, com = profile.upper(), commercial.upper()
+        if "X" in p or "DTS:X" in com:
+            return "DTS-X"
+        if "MA" in p or ("DTS-HD" in com and "MASTER" in com):
+            return "DTS-HD MA"
+        if "HRA" in p:
+            return "DTS-HD HRA"
+        return "DTS"
+    if u == "AAC":   return "AAC"
+    if u == "FLAC":  return "FLAC"
+    if "OPUS" in u:  return "Opus"
+    if "PCM"  in u:  return "LPCM"
+    return fmt
+
+
+def channels_display(ch: int) -> str:
+    if ch >= 8: return "7.1"
+    if ch >= 6: return "5.1"
+    if ch >= 2: return "2.0"
+    if ch == 1: return "1.0"
+    return str(ch)
+
+
+_LANG_NAMES: dict[str, str] = {
+    "en":  "English",
+    "fr":  "French",
+    "de":  "German",
+    "es":  "Spanish",
+    "pt":  "Portuguese",
+    "it":  "Italian",
+    "ja":  "Japanese",
+    "ko":  "Korean",
+    "zh":  "Chinese",
+    "ar":  "Arabic",
+    "ru":  "Russian",
+    "hi":  "Hindi",
+    "nl":  "Dutch",
+    "pl":  "Polish",
+    "sv":  "Swedish",
+    "tr":  "Turkish",
+    "und": "Unknown",
+}
+
+
+def _lang_name(code: str) -> str:
+    return _LANG_NAMES.get(code.lower().strip(), code)
+
+
+# ========================= HIERARCHICAL FILE LISTING =========================
+
+def _idx_to_letters(n: int) -> str:
+    n += 1
+    letters = ""
+    while n > 0:
+        n -= 1
+        letters = chr(ord("A") + (n % 26)) + letters
+        n //= 26
+    return letters
+
+
+def list_files_hierarchical(base_dir: Path, max_depth: int = 3) -> list[dict]:
+    items: list[dict] = []
+    top_counter = [0]
+
+    def _scan(directory: Path, parent_key: str | None, depth: int) -> None:
+        if depth > max_depth:
+            return
+        try:
+            raw = [
+                e for e in directory.iterdir()
+                if not e.name.startswith(".") and e.name != "__pycache__"
+            ]
+            entries = sorted(raw, key=lambda p: (p.stat().st_mtime, p.name.lower()))
+        except (PermissionError, OSError):
+            return
+
+        visible = [
+            e for e in entries
+            if e.is_dir() or (e.is_file() and e.suffix.lower() in VIDEO_EXTS)
+        ]
+
+        for idx, entry in enumerate(visible):
+            if depth == 1:
+                top_counter[0] += 1
+                key = str(top_counter[0])
+            else:
+                key = (parent_key or "") + _idx_to_letters(idx)
+
+            items.append({
+                "key":    key,
+                "path":   entry,
+                "is_dir": entry.is_dir(),
+                "depth":  depth,
+            })
+
+            if entry.is_dir():
+                _scan(entry, key, depth + 1)
+
+    _scan(base_dir, None, 1)
+    return items
+
+
+def display_hierarchical_list(items: list[dict]) -> None:
+    for item in items:
+        indent   = "  " * (item["depth"] - 1)
+        name     = item["path"].name + ("/" if item["is_dir"] else "")
+        key_str  = f"{c.WHITE}{item['key']}{c.RESET}"
+        name_col = c.PURPLE if item["is_dir"] else c.CYAN
+        size_str = ""
+        if not item["is_dir"]:
+            try:
+                size_str = f"  {c.DIM}[{fmt_size_gb(item['path'].stat().st_size)}]{c.RESET}"
+            except OSError:
+                size_str = ""
+        print(f"  {indent}{key_str}  {name_col}{name}{c.RESET}{size_str}")
+
+
+# ========================= INTERACTIVE FILE SELECTION =========================
+
+def select_files_interactive() -> tuple[Path | None, Path | None, Path | None]:
+    base_dir = Path.cwd()
+
+    while True:
+        banner()
+        print(f"{c.BOLD}{c.CYAN}Directory: {base_dir}{c.RESET}\n")
+        items = list_files_hierarchical(base_dir)
+
+        if not items:
+            print(f"  {c.YELLOW}No video files or sub-folders found here.{c.RESET}")
+        else:
+            display_hierarchical_list(items)
+
+        print()
+        print(f"  {c.DIM}Enter folder key to navigate into it.{c.RESET}")
+        print(f"  {c.DIM}Enter Source,Encoded[,Comparison] keys to select"
+              f" (e.g. 1,2A or 1,2A,3AA). Comparison defaults to Source.{c.RESET}")
+        print(f"  {c.WHITE}0{c.RESET} / {c.WHITE}..{c.RESET} = go up  "
+              f"  {c.WHITE}q{c.RESET} = quit")
+
+        raw = input(f"\n{c.BOLD}> {c.RESET}").strip()
+
+        if not raw:
+            continue
+        if raw.lower() == "q":
+            sys.exit(0)
+        if raw in ("0", ".."):
+            parent = base_dir.parent
+            if parent != base_dir:
+                base_dir = parent
+            continue
+
+        item_map = {item["key"].upper(): item for item in items}
+
+        # Single key → navigate into folder
+        if raw.upper() in item_map and item_map[raw.upper()]["is_dir"]:
+            base_dir = item_map[raw.upper()]["path"]
+            continue
+
+        # Try parsing as two or three comma-separated keys
+        parts = [p.strip().upper() for p in raw.split(",")]
+        if len(parts) == 2:
+            # Comparison omitted → defaults to source
+            parts.append(parts[0])
+        if len(parts) != 3:
+            print(f"\n  {c.RED}Error: Enter 2 or 3 keys separated by commas, "
+                  f"or a single folder key to navigate.{c.RESET}")
+            input("  Press Enter to continue...")
+            continue
+
+        source_key, encoded_key, comp_key = parts
+        errs:  list[str]             = []
+        paths: dict[str, Path | None] = {
+            "source": None, "encoded": None, "comparison": None,
+        }
+
+        for key, role in [
+            (source_key, "source"),
+            (encoded_key, "encoded"),
+            (comp_key, "comparison"),
+        ]:
+            item = item_map.get(key)
+            if item is None:
+                errs.append(f"Key '{key}' not found in listing")
+            elif item["is_dir"]:
+                errs.append(f"Key '{key}' is a folder – select a video file")
+            else:
+                paths[role] = item["path"]
+
+        if errs:
+            for msg in errs:
+                print(f"\n  {c.RED}Error: {msg}{c.RESET}")
+            input("  Press Enter to try again...")
+            continue
+
+        return paths["source"], paths["encoded"], paths["comparison"]
+
+
+# ========================= SCREENSHOT EXTRACTION =========================
+
+def get_frame_count(video: Path) -> int:
+    """Return the total video frame count via ffprobe. Returns 0 on failure."""
+    # Primary: read nb_frames stored in stream metadata
+    try:
+        raw = subprocess.check_output(
+            [
+                _ffprobe_exe(), "-v", "error",
+                "-select_streams", "v:0",
+                "-show_entries", "stream=nb_frames",
+                "-of", "default=noprint_wrappers=1:nokey=1",
+                str(video),
+            ],
+            startupinfo=hide_window(),
+            timeout=30,
+        ).decode().strip()
+        n = int(raw)
+        if n > 0:
+            return n
+    except Exception:
+        pass
+
+    # Fallback: derive from stream duration × frame-rate; also try format-level
+    # duration for containers (e.g. MKV/HEVC) that omit per-stream duration.
+    try:
+        out = subprocess.check_output(
+            [
+                _ffprobe_exe(), "-v", "error",
+                "-select_streams", "v:0",
+                "-show_entries", "stream=r_frame_rate,duration:format=duration",
+                "-of", "json",
+                str(video),
+            ],
+            startupinfo=hide_window(),
+            timeout=30,
+        ).decode().strip()
+        data   = json.loads(out)
+        stream = (data.get("streams") or [{}])[0]
+        fps_s  = stream.get("r_frame_rate", "0/1")
+        # Prefer stream-level duration; fall back to container-level duration.
+        dur_s  = stream.get("duration") or (data.get("format") or {}).get("duration", "0")
+        parts = fps_s.split("/")
+        num, den = parts[0], parts[1] if len(parts) > 1 else "1"
+        fps   = float(num) / float(den) if float(den) else 0.0
+        total = int(fps * float(dur_s or 0))
+        if total > 0:
+            return total
+    except Exception:
+        pass
+
+    # Third fallback: use MediaInfo which reliably reports FrameCount for
+    # MKV/x264 containers that omit per-stream nb_frames / duration metadata.
+    try:
+        r = subprocess.check_output(
+            ["mediainfo", "--Output=JSON", str(video)],
+            startupinfo=hide_window(),
+            timeout=60,
+        ).decode(errors="replace")
+        mi_data = json.loads(r)
+        for track in (mi_data.get("media") or {}).get("track") or []:
+            if track.get("@type") == "Video":
+                n = int(track.get("FrameCount") or 0) if str(track.get("FrameCount", "0")).isdigit() else 0
+                if n > 0:
+                    return n
+    except Exception:
+        pass
+
+    return 0
+
+
+def take_frames_at_numbers(
+    video: Path,
+    frame_numbers: list[int],
+    name_prefix: str,
+    label: str = "screenshots",
+) -> list[Path]:
+    """Extract frames at the given absolute frame numbers (0-based) from *video*.
+
+    Uses fast input-seek (-ss before -i) by converting frame numbers to
+    timestamps via the stream's frame rate.  Falls back to the slow
+    select-filter only when the frame rate cannot be determined.
+    """
+    ext    = "png" if LOSSLESS_SCREENSHOT else "jpg"
+    max_mb = 32 if IMAGE_HOST.lower() == "imgbb" else 64
+    files: list[Path] = []
+
+    # Get FPS so we can convert frame numbers → timestamps for fast seeking.
+    fps = 0.0
+    try:
+        raw = subprocess.check_output(
+            [
+                _ffprobe_exe(), "-v", "error",
+                "-select_streams", "v:0",
+                "-show_entries", "stream=r_frame_rate",
+                "-of", "default=noprint_wrappers=1:nokey=1",
+                str(video),
+            ],
+            startupinfo=hide_window(),
+            timeout=30,
+        ).decode().strip()
+        parts = raw.split("/")
+        num, den = parts[0], parts[1] if len(parts) > 1 else "1"
+        fps = float(num) / float(den) if float(den) else 0.0
+    except Exception:
+        pass
+
+    log(f"Taking {len(frame_numbers)} {label} from {c.BOLD}{video.name}{c.RESET}...", "SHOT")
+
+    for serial, frame_num in enumerate(frame_numbers, 1):
+        out = Path(f"{name_prefix}{serial:03d}.{ext}")
+
+        if fps > 0:
+            # Fast path: seek to the approximate timestamp, grab the first
+            # decoded frame.  Much faster than decoding from the beginning.
+            timestamp = frame_num / fps
+            cmd = [
+                _ffmpeg_exe(), "-ss", f"{timestamp:.3f}", "-i", str(video),
+                "-vframes", "1", "-q:v", "1", "-y", str(out),
+            ]
+        else:
+            # Slow fallback: select-filter (decodes from stream start).
+            cmd = [
+                _ffmpeg_exe(), "-i", str(video),
+                "-vf", f"select=eq(n\\,{frame_num})",
+                "-vframes", "1", "-vsync", "0",
+                "-q:v", "1", "-y", str(out),
+            ]
+
+        subprocess.run(
+            cmd,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            startupinfo=hide_window(),
+        )
+
+        if not out.exists():
+            error(f"Frame {serial}/{len(frame_numbers)} (#{frame_num}) failed for {video.name}")
+            continue
+
+        # Fall back to JPEG if PNG is too large for the host
+        size_mb = out.stat().st_size / (1 << 20)
+        if LOSSLESS_SCREENSHOT and ext == "png" and size_mb > max_mb:
+            out.unlink()
+            out = Path(f"{name_prefix}{serial:03d}.jpg")
+            cmd[-1] = str(out)
+            subprocess.run(
+                cmd,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                startupinfo=hide_window(),
+            )
+            if not out.exists():
+                error(f"Frame {serial} JPEG fallback failed for {video.name}")
+                continue
+
+        files.append(out)
+        _GENERATED_FILES.append(out)
+
+    success(f"{len(files)}/{len(frame_numbers)} {label} captured.")
+    return files
+
+
+def take_frames(
+    video: Path,
+    name_prefix: str,
+    percents: list[float] = FRAME_PERCENTS,
+    label: str = "screenshots",
+) -> list[Path]:
+    try:
+        raw = subprocess.check_output(
+            [
+                _ffprobe_exe(), "-v", "error",
+                "-show_entries", "format=duration",
+                "-of", "default=noprint_wrappers=1:nokey=1",
+                str(video),
+            ],
+            startupinfo=hide_window(),
+        ).decode().strip()
+        duration = float(raw)
+    except Exception:
+        error(f"Could not get duration for {video.name}")
+        return []
+
+    if duration <= 0:
+        error(f"Invalid duration ({duration}s) for {video.name}")
+        return []
+
+    ext    = "png" if LOSSLESS_SCREENSHOT else "jpg"
+    max_mb = 32 if IMAGE_HOST.lower() == "imgbb" else 64
+    files: list[Path] = []
+
+    log(f"Taking {len(percents)} {label} from {c.BOLD}{video.name}{c.RESET}...", "SHOT")
+
+    for serial, pct in enumerate(percents, 1):
+        timestamp = duration * pct
+        out = Path(f"{name_prefix}{serial:03d}.{ext}")
+
+        cmd = [
+            _ffmpeg_exe(), "-ss", f"{timestamp:.3f}", "-i", str(video),
+            "-vframes", "1", "-q:v", "1", "-y", str(out),
+        ]
+        subprocess.run(
+            cmd,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            startupinfo=hide_window(),
+        )
+
+        if not out.exists():
+            error(f"Frame {serial}/{len(percents)} failed for {video.name}")
+            continue
+
+        # Fall back to JPEG if PNG is too large for the host
+        size_mb = out.stat().st_size / (1 << 20)
+        if LOSSLESS_SCREENSHOT and ext == "png" and size_mb > max_mb:
+            out.unlink()
+            out = Path(f"{name_prefix}{serial:03d}.jpg")
+            cmd[-1] = str(out)
+            subprocess.run(
+                cmd,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                startupinfo=hide_window(),
+            )
+            if not out.exists():
+                error(f"Frame {serial} JPEG fallback failed for {video.name}")
+                continue
+
+        files.append(out)
+        _GENERATED_FILES.append(out)
+
+    success(f"{len(files)}/{len(percents)} {label} captured.")
+    return files
+
+
+# ========================= IMAGE UPLOAD =========================
+
+def _bounded_workers(n: int) -> int:
+    cpu = os.cpu_count() or 1
+    return max(1, min(
+        MAX_CONCURRENT_UPLOADS,
+        n,
+        max(MIN_IO_WORKERS, cpu * IO_WORKER_MULTIPLIER),
+    ))
+
+
+def _parse_upload_error(data: dict) -> str:
+    err = data.get("error")
+    if isinstance(err, dict):
+        return str(err.get("message") or err.get("info") or err)
+    return str(err) if err else "unknown error"
+
+
+def _upload_via_host(img: Path, host: str) -> tuple[str | None, bool]:
+    filename = img.name
+    try:
+        if host == "imgbb":
+            if not IMGBB_API_KEY:
+                return None, False
+            with img.open("rb") as fh:
+                r = requests.post(
+                    "https://api.imgbb.com/1/upload",
+                    params={"key": IMGBB_API_KEY},
+                    data={"name": quote(filename, safe="")},
+                    files={"image": fh},
+                    timeout=UPLOAD_TIMEOUT,
+                )
+            if r.status_code == 200:
+                data     = r.json()
+                img_data = data.get("data") or {}
+                url      = img_data.get("url") or img_data.get("display_url")
+                if data.get("success") and url:
+                    return url, False
+                error(f"imgbb upload failed ({filename}): {_parse_upload_error(data)}")
+
+        elif host == "freeimage":
+            with img.open("rb") as fh:
+                r = requests.post(
+                    "https://freeimage.host/api/1/upload",
+                    params={"key": FREEIMAGE_API_KEY},
+                    files={"source": fh},
+                    data={"format": "json", "name": quote(filename, safe="")},
+                    timeout=UPLOAD_TIMEOUT,
+                )
+            if r.status_code == 200:
+                data = r.json()
+                if data.get("status_code") == 200 and data.get("image", {}).get("url"):
+                    return data["image"]["url"], False
+                error(f"freeimage upload failed ({filename}): {_parse_upload_error(data)}")
+
+    except json.JSONDecodeError as exc:
+        error(f"{host} invalid JSON response ({filename}): {exc}")
+    except requests.RequestException as exc:
+        error(f"{host} network error ({filename}): {exc}")
+    except OSError as exc:
+        error(f"{host} file error ({filename}): {exc}")
+        return None, True
+
+    return None, False
+
+
+def upload_image(img: Path) -> str | None:
+    primary = IMAGE_HOST.lower()
+    hosts   = [primary] + [h for h in ("imgbb", "freeimage") if h != primary]
+    for host in hosts:
+        url, fatal = _upload_via_host(img, host)
+        if url:
+            return url
+        if fatal:
+            break
+    return None
+
+
+def upload_images_concurrent(images: list[Path]) -> list[str]:
+    if not images:
+        return []
+
+    total  = len(images)
+    done   = [0]
+    result_map: dict[int, str] = {}
+
+    log(f"Uploading {total} encoded screenshot(s)...", "UP")
+
+    with concurrent.futures.ThreadPoolExecutor(
+        max_workers=_bounded_workers(total)
+    ) as executor:
+        future_map = {executor.submit(upload_image, img): i
+                      for i, img in enumerate(images)}
+        for future in concurrent.futures.as_completed(future_map):
+            i = future_map[future]
+            try:
+                url = future.result()
+            except Exception as exc:
+                error(f"Upload exception (image {i + 1}): {exc}")
+                url = None
+            if url:
+                result_map[i] = url
+            done[0] += 1
+            log(f"  uploaded {done[0]}/{total}", "UP", c.CYAN)
+
+    urls = [result_map.get(i, "") for i in range(total)]
+    success(f"Uploaded {sum(1 for u in urls if u)}/{total} encoded screenshots.")
+    return urls
+
+
+# ========================= TORRENT CREATION =========================
+
+def create_torrent(target: Path, include_srt: bool | None = None) -> bool:
+    global _GENERATED_TORRENT
+
+    if not CREATE_TORRENT_FILE:
+        log("Torrent creation disabled.", "Skip")
+        return True
+
+    if not shutil.which("mkbrr"):
+        error("mkbrr not found! → https://github.com/autobrr/mkbrr")
+        return False
+
+    out = target.parent / f"{target.name}.torrent"
+
+    # Do NOT overwrite a torrent that already existed before this script ran
+    if out.exists():
+        log(f"Torrent already exists: {out.name} – skipping.", "Skip", c.YELLOW)
+        return True
+
+    # ---- build exclude list ----
+    exclude: list[str] = []
+    if target.is_dir():
+        exclude.extend(["*.nfo", "*.txt", "*.srr"])
+        _skip_names = {
+            "screens", "screen", "proof", "screenshots", "screenshot",
+            "sample", "samples",
+        }
+        for item in target.rglob("*"):
+            ln = item.name.lower()
+            stem_lower = item.stem.lower()
+            suffix_lower = item.suffix.lower()
+            try:
+                rel = item.relative_to(target).as_posix()
+            except ValueError:
+                continue
+            if item.is_dir() and ln in _skip_names:
+                pattern = f"{rel}/**"
+                if pattern not in exclude:
+                    exclude.append(pattern)
+            elif item.is_file() and (
+                _STEM_SAMPLE_RE.search(stem_lower)
+                or stem_lower in _skip_names
+                or suffix_lower in _IMAGE_EXTENSIONS
+                or suffix_lower == ".rar"
+                or _RAR_VOLUME_RE.search(ln)
+            ):
+                if rel not in exclude:
+                    exclude.append(rel)
+
+        srt_files = list(target.rglob("*.srt"))
+        if srt_files:
+            if include_srt is None:
+                ans = input(
+                    f"\n{c.BOLD}Include .srt files in torrent? [y/N]: {c.RESET}"
+                ).strip().lower()
+                include_srt = ans == "y"
+            if not include_srt:
+                exclude.append("*.srt")
+
+    # ---- build command ----
+    cmd = [
+        "mkbrr", "create",
+        "-t", TRACKER_ANNOUNCE,
+        f"--private={'true' if PRIVATE_TORRENT else 'false'}",
+        "-o", str(out),
+    ]
+
+    # NEW: optional torrent comment
+    if ADD_TORRENT_COMMENT and TORRENT_COMMENT.strip():
+        cmd.extend(["--comment", TORRENT_COMMENT.strip()])
+
+    for pattern in exclude:
+        cmd.extend(["--exclude", pattern])
+    cmd.append(str(target))
+
+    # ---- run with progress bar ----
+    log("Creating torrent...", "TOR")
+    _pct_re = re.compile(r"(\d+)\s*%")
+    _last   = [-1]
+    bar_len = 12
+
+    def _bar(pct: int) -> str:
+        filled = int(bar_len * pct // 100)
+        return (
+            f"{c.CYAN}Torrent: "
+            f"[{'█' * filled}{'▒' * (bar_len - filled)}] {pct}%{c.RESET}"
+        )
+
+    process = subprocess.Popen(
+        cmd,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+        universal_newlines=True,
+        startupinfo=hide_window(),
+    )
+
+    try:
+        sys.stdout.write(f"\r\033[K{_bar(0)}\n")
+        sys.stdout.flush()
+        while True:
+            line = process.stdout.readline()
+            if not line and process.poll() is not None:
+                break
+            if line:
+                m = _pct_re.search(line.strip())
+                if m:
+                    pct = min(int(m.group(1)), 100)
+                    if pct != _last[0]:
+                        sys.stdout.write(f"\033[A\r\033[K{_bar(pct)}\n")
+                        sys.stdout.flush()
+                        _last[0] = pct
+                elif "Wrote" in line:
+                    sys.stdout.write(f"\033[A\r\033[K{_bar(100)}\n")
+                    sys.stdout.flush()
+    finally:
+        sys.stdout.write("\033[A\r\033[K")
+        sys.stdout.flush()
+
+    rc = process.wait()
+    if rc == 0 and out.exists():
+        _GENERATED_TORRENT = out
+        _GENERATED_FILES.append(out)
+        success(f"Torrent created: {out.name}")
+        return True
+
+    error("Torrent creation failed!")
+    return False
+
+
+# ========================= DESCRIPTION GENERATION =========================
+
+def _bb(label: str, value: str) -> str:
+    return (
+        f"[color=#7EC544][font=Segoe UI][b][size=4]{label}[/size][/b][/font][/color]"
+        f" [color=#037E8C][b][size=4]{value}[/size][/b][/color]"
+    )
+
+
+def _bb_label(label: str) -> str:
+    """Return only the label part of a _bb() line (no value wrapping tags)."""
+    return f"[color=#7EC544][font=Segoe UI][b][size=4]{label}[/size][/b][/font][/color]"
+
+
+def _extract_tracks(mi_json: dict) -> dict:
+    tracks = mi_json.get("media", {}).get("track", [])
+    result: dict = {
+        "general": None, "video": None, "audio": [], "text": [], "menu": None,
+    }
+    for t in tracks:
+        tt = t.get("@type", "")
+        if   tt == "General"                           : result["general"] = t
+        elif tt == "Video"  and result["video"] is None: result["video"]   = t
+        elif tt == "Audio"                             : result["audio"].append(t)
+        elif tt == "Text"                              : result["text"].append(t)
+        elif tt == "Menu"                              : result["menu"] = t
+    return result
+
+
+def generate_description(
+    source_path:      Path,
+    comparison_path:  Path | None,
+    encoded_path:     Path | None,
+    mediainfo_text:   str,
+    encoded_ss_urls:  list[str],
+) -> str:
+    main_path = encoded_path if encoded_path else source_path
+
+    mi_json = get_mediainfo_json(main_path)
+    tracks  = _extract_tracks(mi_json)
+    g       = tracks["general"] or {}
+    v       = tracks["video"]
+    audios  = tracks["audio"]
+    texts   = tracks["text"]
+    menu    = tracks["menu"]
+
+    lines: list[str] = []
+
+    lines.append(_bb("File name:", main_path.name))
+
+    file_size = _safe_int(g.get("FileSize", 0))
+    if not file_size and main_path.is_file():
+        file_size = main_path.stat().st_size
+    lines.append(_bb("File size:", fmt_filesize(file_size) if file_size else "N/A"))
+
+    dur_s = _safe_float(g.get("Duration", 0))
+    lines.append(_bb("Duration:", fmt_duration(dur_s) if dur_s else "N/A"))
+
+    if v:
+        codec   = video_codec_display(v.get("Format", ""))
+        vbr     = _safe_float(v.get("BitRate") or v.get("BitRate_Nominal", 0))
+        width   = _safe_int(v.get("Width",  0))
+        height  = _safe_int(v.get("Height", 0))
+        res_lbl = resolution_label(width, height)
+        fps     = _safe_float(v.get("FrameRate", 0))
+        fps_str = f"{fps:.3f} fps" if fps else "N/A"
+        res_str = f"{width}x{height}" if (width and height) else "N/A"
+        ratio   = aspect_ratio(width, height)
+        bdepth  = _safe_int(v.get("BitDepth", 0))
+        bits    = f" | {bdepth}-bit" if bdepth else ""
+        vid_val = (
+            f"{codec} | {fmt_bitrate(vbr) if vbr else 'N/A'} | {res_lbl}"
+            f" | {fps_str} | {res_str} | {ratio}{bits}"
+        )
+        lines.append(_bb("Video:", vid_val))
+    else:
+        lines.append(_bb("Video:", "N/A"))
+
+    def _audio_line(a: dict) -> str:
+        lang = _lang_name((a.get("Language") or "").strip() or "und")
+        aco  = audio_codec_display(
+            a.get("Format", ""),
+            a.get("Format_Profile", ""),
+            a.get("Format_Commercial_IfAny", ""),
+        )
+        ch  = _safe_int(
+            str(a.get("Channels") or a.get("Channel(s)", "0")).split("/")[0]
+        )
+        abr = _safe_float(a.get("BitRate") or a.get("BitRate_Nominal", 0))
+        return f"{lang} | {aco} | {channels_display(ch)} | {fmt_bitrate(abr) if abr else 'N/A'}"
+
+    if not audios:
+        lines.append(_bb("Audio:", "N/A"))
+    elif len(audios) == 1:
+        lines.append(_bb("Audio:", _audio_line(audios[0])))
+    else:
+        for idx, a in enumerate(audios, 1):
+            lines.append(_bb(f"Audio Track {idx}:", _audio_line(a)))
+
+    if texts:
+        sub_parts = []
+        for t in texts:
+            lang  = (t.get("Language") or "").strip()
+            title = (t.get("Title")    or "").strip()
+            sub_parts.append(_lang_name(lang) if lang else (title or "Unknown"))
+        lines.append(_bb("Subtitle(s):", ", ".join(sub_parts)))
+    else:
+        lines.append(_bb("Subtitle(s):", "N/A"))
+
+    if menu:
+        ch_keys = [k for k in menu if not k.startswith("@") and k != "extra"]
+        if not ch_keys:
+            extra = menu.get("extra") or {}
+            ch_keys = [k for k in extra if not k.startswith("@")]
+        lines.append(_bb("Chapters:", f"{len(ch_keys)} chapters" if ch_keys else "No"))
+    else:
+        lines.append(_bb("Chapters:", "No"))
+
+    src1 = strip_p2p_name(source_path.name)
+    src1_suffix = " (thanks)"
+    if comparison_path and comparison_path.resolve() == source_path.resolve():
+        src1_suffix += " (Also for comparison)"
+    lines.append(_bb("Source:", f"{src1}{src1_suffix}"))
+
+    if comparison_path and comparison_path.resolve() != source_path.resolve():
+        src2 = strip_p2p_name(comparison_path.name)
+        lines.append(_bb("Source(2):", f"{src2} (For comparison)"))
+
+    lines.append(_bb_label("Logs:") + " [spoiler][b]__LOGS__[/b][/spoiler]")
+
+    lines.append(_bb_label("Frame Comparison:") + " [url=__SLOWPICS__]Click Here[/url]")
+
+    lines.append(
+        "[center][b][size=5][color=#59E817][font=Oswald]MediaInfo"
+        "[/font][/color][/size][/b][/center]"
+        "[spoiler][mediainfo]" + mediainfo_text + "[/mediainfo][/spoiler]"
+    )
+
+    ss_bb = (
+        "\n".join(f"[center][img]{u}[/img][/center]" for u in encoded_ss_urls if u)
+        if encoded_ss_urls else ""
+    )
+    lines.append(
+        "[center][b][size=5][color=#59E817][font=Oswald]Screenshots"
+        "[/font][/color][/size][/b][/center]\n"
+        + ss_bb
+    )
+
+    return "\n".join(lines)
+
+
+# ========================= WEB SERVER HTML =========================
+
+def _imdb_search_name(stem: str) -> str:
+    """Return just the show or movie name from a filename stem for IMDB search."""
+    # TV show: extract everything before SxxExx or NxNN
+    m = re.search(r"S\d{2}E\d{2}", stem, re.I)
+    if not m:
+        m = re.search(r"(?<!\d)\d{1,2}x\d{2,3}(?!\d)", stem, re.I)
+    if m:
+        name = stem[:m.start()]
+    else:
+        # Movie: strip from first resolution tag or 4-digit year
+        m = re.search(r"(?<![A-Za-z0-9])(?:2160|1080|720|480)[pi]?(?![A-Za-z0-9])", stem, re.I)
+        if not m:
+            m = re.search(r"(?<![A-Za-z0-9])(?:19|20)\d{2}(?![A-Za-z0-9])", stem)
+        name = stem[:m.start()] if m else stem
+    return re.sub(r"[._]+", " ", name).strip()
+
+
+def _build_html(
+    description:          str,
+    title_str:            str,
+    torrent_filename:     str,
+    encoded_filenames:    list[str],
+    comparison_filenames: list[str],
+) -> str:
+
+    # ---- encoded screenshots grid (local download links) ----
+    enc_grid = ""
+    for i, fname in enumerate(encoded_filenames, 1):
+        safe = quote(fname)
+        enc_grid += (
+            f'<div class="ss-item">'
+            f'<span class="ss-lbl">Encoded {i:02d}</span>'
+            f'<a class="dl-link" href="/api/encoded/{safe}" download="{fname}">'
+            f'Download {fname}</a>'
+            f'</div>\n'
+        )
+
+    # ---- comparison screenshots grid ----
+    comp_grid = ""
+    for i, fname in enumerate(comparison_filenames, 1):
+        safe = quote(fname)
+        comp_grid += (
+            f'<div class="ss-item">'
+            f'<span class="ss-lbl">Comparison {i:02d}</span>'
+            f'<a class="dl-link" href="/api/comparison/{safe}" download="{fname}">'
+            f'Download {fname}</a>'
+            f'</div>\n'
+        )
+
+    comp_names_json  = json.dumps(comparison_filenames)
+    imdb_url = f"https://www.imdb.com/find?q={quote(_imdb_search_name(title_str), safe='')}"
+    enc_names_json   = json.dumps(encoded_filenames)
+    base_desc_json   = json.dumps(description)
+    default_logs_json = json.dumps("{logs \u2013 keep as is, fill in yourself}")
+    desc_escaped     = (
+        description.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    )
+
+    return f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1.0"/>
+<title>Encode Upload Tool</title>
+<style>
+:root{{--bg:#eef3fb;--sur:#ffffff;--bg-soft:#f8fbff;--brd:#ccd7ea;--txt:#1f2937;--mut:#5b6472;
+  --acc:#4f46e5;--grn:#15803d;--yel:#b45309;--r:10px}}
+*{{box-sizing:border-box;margin:0;padding:0}}
+body{{background:var(--bg);color:var(--txt);
+  font-family:'Segoe UI',system-ui,sans-serif;
+  min-height:100vh;padding:16px;max-width:960px;margin:0 auto}}
+header{{text-align:center;padding-bottom:14px;
+  border-bottom:1px solid var(--brd);margin-bottom:18px}}
+.logo{{font-size:1.05rem;font-weight:700;color:var(--yel)}}
+.card{{background:var(--sur);border:1px solid var(--brd);
+  border-radius:var(--r);padding:14px;margin-bottom:14px}}
+.lbl{{font-size:.66rem;font-weight:700;text-transform:uppercase;
+  letter-spacing:1px;color:var(--mut);margin-bottom:8px}}
+.desc{{font-family:'Courier New',monospace;font-size:.73rem;line-height:1.5;
+  white-space:pre-wrap;word-break:break-word;max-height:280px;overflow-y:auto;
+  padding:8px 10px;background:var(--bg-soft);border:1px solid var(--brd);
+  border-radius:6px;margin-bottom:10px;color:#b0bac6}}
+.btns{{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:6px}}
+button{{padding:5px 12px;border-radius:6px;border:1px solid var(--brd);
+  background:#f3f7ff;color:var(--txt);cursor:pointer;font-size:.78rem;
+  font-weight:500;transition:background .12s}}
+button:hover{{background:#e8eefb}}
+button.dl{{border-color:#1d4ed8;color:#1d4ed8;background:#eff6ff}}
+button.ok{{border-color:var(--grn);color:var(--grn);background:#ecfdf3}}
+.tor-name{{font-size:.77rem;color:var(--mut);margin-bottom:8px;word-break:break-all}}
+.ss-grid{{display:grid;
+  grid-template-columns:repeat(auto-fill,minmax(200px,1fr));
+  gap:10px;margin-top:8px}}
+.ss-item{{background:var(--bg-soft);border:1px solid var(--brd);
+  border-radius:6px;padding:8px}}
+.ss-lbl{{font-size:.68rem;color:var(--mut);display:block;margin-bottom:4px}}
+.dl-link{{color:#1d4ed8;font-size:.76rem;word-break:break-all;
+  text-decoration:none}}
+.dl-link:hover{{text-decoration:underline}}
+.toast{{position:fixed;bottom:16px;right:16px;background:#ffffff;
+  border:1px solid var(--brd);border-radius:8px;padding:7px 14px;
+  font-size:.80rem;color:var(--grn);opacity:0;transform:translateY(5px);
+  transition:opacity .17s,transform .17s;pointer-events:none;z-index:9999}}
+.toast.show{{opacity:1;transform:translateY(0)}}
+</style>
+</head>
+<body>
+<header>
+  <div class="logo">Encode Comparison &amp; Upload Tool</div>
+</header>
+
+<div class="card">
+  <div class="lbl">Title</div>
+  <div id="title-box" style="padding:8px;background:var(--bg);border:1px solid var(--brd);
+    border-radius:6px;font-size:.85rem;margin-bottom:10px;
+    word-break:break-all;overflow-wrap:break-word">{title_str}</div>
+  <div class="btns">
+    <button onclick="copyTitle()">Copy Title</button>
+    <a href="{imdb_url}" target="_blank" rel="noopener noreferrer">
+      <button>Search IMDb</button>
+    </a>
+  </div>
+</div>
+
+<div class="card">
+  <div class="lbl">Description · BBCode</div>
+  <pre class="desc" id="desc-box">{desc_escaped}</pre>
+  <div class="btns">
+    <button onclick="copyDesc()">Copy Description</button>
+  </div>
+</div>
+
+<div class="card">
+  <div class="lbl">Frame Comparison · slow.pics URL</div>
+  <input type="url" id="slowpics-input"
+    placeholder="https://slow.pics/c/your-comparison-id"
+    style="width:100%;padding:7px 10px;background:var(--bg);border:1px solid var(--brd);
+      border-radius:6px;color:var(--txt);font-size:.82rem;margin-bottom:6px"/>
+  <div style="font-size:.70rem;color:var(--mut)">Paste your slow.pics URL – updates the description automatically.</div>
+</div>
+
+<div class="card">
+  <div class="lbl">Logs · paste here</div>
+  <textarea id="logs-input"
+    placeholder="Paste your encode log here – it will be wrapped in [spoiler] in the description."
+    style="width:100%;height:110px;padding:7px 10px;background:var(--bg);
+      border:1px solid var(--brd);border-radius:6px;color:var(--txt);
+      font-size:.73rem;font-family:'Courier New',monospace;resize:vertical;
+      margin-bottom:6px"></textarea>
+  <button onclick="clearLogs()">Clear</button>
+</div>
+
+<div class="card">
+  <div class="lbl">Torrent File</div>
+  <div class="tor-name">{torrent_filename}</div>
+  <div class="btns">
+    <button class="dl"
+      onclick="window.location.href='/api/torrent'">Download Torrent</button>
+  </div>
+</div>
+
+<div class="card">
+  <div class="lbl">
+    Encoded Screenshots · served locally
+    &nbsp;
+    <button class="dl"
+      style="font-size:.70rem;padding:3px 8px"
+      onclick="downloadEncoded()">Download All {len(encoded_filenames)} Encoded Screenshots</button>
+  </div>
+  <div class="ss-grid">
+    {enc_grid or '<span style="color:var(--mut);font-size:.8rem">No encoded screenshots.</span>'}
+  </div>
+</div>
+
+<div class="card">
+  <div class="lbl">
+    Comparison Screenshots · served locally
+    &nbsp;
+    <button class="dl"
+      style="font-size:.70rem;padding:3px 8px"
+      onclick="downloadComparison()">Download All {len(comparison_filenames)} Comparison Screenshots</button>
+    {f'<button class="dl" style="font-size:.70rem;padding:3px 8px;margin-left:4px" onclick="downloadAllTen()">Download All 10</button>' if comparison_filenames and encoded_filenames else ''}
+  </div>
+  <div class="ss-grid">
+    {comp_grid or '<span style="color:var(--mut);font-size:.8rem">No comparison screenshots.</span>'}
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+<script>
+const COMP = {comp_names_json};
+const ENC  = {enc_names_json};
+const BASE_DESC = {base_desc_json};
+const DEFAULT_LOGS = {default_logs_json};
+
+let _toastTimer = null;
+function toast(m) {{
+  const t = document.getElementById('toast');
+  t.textContent = m;
+  t.classList.add('show');
+  clearTimeout(_toastTimer);
+  _toastTimer = setTimeout(() => t.classList.remove('show'), 2500);
+}}
+
+async function cpText(s) {{
+  try {{ await navigator.clipboard.writeText(s); }}
+  catch(e) {{
+    const a = document.createElement('textarea');
+    a.value = s;
+    a.style.cssText = 'position:fixed;opacity:0';
+    document.body.appendChild(a);
+    a.select();
+    document.execCommand('copy');
+    document.body.removeChild(a);
+  }}
+}}
+
+function getCurrentDesc() {{
+  const logsVal = document.getElementById('logs-input').value.trim() || DEFAULT_LOGS;
+  const slowVal = document.getElementById('slowpics-input').value.trim() || 'https://slow.pics/c/';
+  return BASE_DESC.replace('__LOGS__', logsVal).replace('__SLOWPICS__', slowVal);
+}}
+
+function updateDescDisplay() {{
+  document.getElementById('desc-box').textContent = getCurrentDesc();
+}}
+
+function copyDesc() {{
+  cpText(getCurrentDesc()).then(() => toast('Description copied'));
+}}
+
+function copyTitle() {{
+  cpText(document.getElementById('title-box').textContent.trim()).then(() => toast('Title copied'));
+}}
+
+function clearLogs() {{
+  document.getElementById('logs-input').value = '';
+  updateDescDisplay();
+}}
+
+function _dlFile(url, filename, delay) {{
+  setTimeout(() => {{
+    const a = document.createElement('a');
+    a.href     = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+  }}, delay);
+}}
+
+function downloadEncoded() {{
+  if (!ENC.length) {{ toast('No encoded screenshots.'); return; }}
+  ENC.forEach((fname, i) => {{
+    _dlFile('/api/encoded/' + encodeURIComponent(fname), fname, i * 650);
+  }});
+  toast('Downloading ' + ENC.length + ' encoded screenshot(s)...');
+}}
+
+function downloadComparison() {{
+  if (!COMP.length) {{ toast('No comparison screenshots.'); return; }}
+  COMP.forEach((fname, i) => {{
+    _dlFile('/api/comparison/' + encodeURIComponent(fname), fname, i * 650);
+  }});
+  toast('Downloading ' + COMP.length + ' comparison screenshot(s)...');
+}}
+
+function downloadAllTen() {{
+  ENC.forEach((fname, i) => {{
+    _dlFile('/api/encoded/' + encodeURIComponent(fname), fname, i * 650);
+  }});
+  COMP.forEach((fname, i) => {{
+    _dlFile('/api/comparison/' + encodeURIComponent(fname), fname, (ENC.length + i) * 650);
+  }});
+  toast('Downloading all 10 screenshots...');
+}}
+
+document.getElementById('slowpics-input').addEventListener('input', updateDescDisplay);
+document.getElementById('logs-input').addEventListener('input', updateDescDisplay);
+updateDescDisplay();
+</script>
+</body>
+</html>"""
+
+
+# ========================= WEB SERVER =========================
+
+class _EncodeServer(HTTPServer):
+    """HTTPServer subclass that silently drops client-disconnect errors."""
+    def handle_error(self, request, client_address):
+        if sys.exc_info()[0] in (
+            ConnectionResetError, BrokenPipeError, ConnectionAbortedError
+        ):
+            return
+        super().handle_error(request, client_address)
+
+
+class _EncodeHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        parsed = urlparse(self.path)
+        route  = parsed.path
+
+        if route in ("/", "/index.html"):
+            self._serve_html()
+        elif route == "/api/torrent":
+            self._serve_torrent()
+        elif route.startswith("/api/comparison/"):
+            fname = unquote(route[len("/api/comparison/"):])
+            self._serve_comparison(fname)
+        elif route.startswith("/api/encoded/"):
+            fname = unquote(route[len("/api/encoded/"):])
+            self._serve_encoded(fname)
+        else:
+            self.send_response(404)
+            self.end_headers()
+
+    def _hdr(self, ct: str, length: int | None = None):
+        self.send_response(200)
+        self.send_header("Content-Type", ct)
+        self.send_header("Cache-Control", "no-store, no-cache")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        if length is not None:
+            self.send_header("Content-Length", str(length))
+        self.end_headers()
+
+    def _serve_html(self):
+        body = _WEBAPP_HTML.encode("utf-8")
+        self._hdr("text/html; charset=utf-8", len(body))
+        self.wfile.write(body)
+
+    def _serve_torrent(self):
+        if _GENERATED_TORRENT and _GENERATED_TORRENT.exists():
+            body = _GENERATED_TORRENT.read_bytes()
+            # Build a safe, non-tainted download filename from the stem and a fixed extension
+            raw_stem = Path(_GENERATED_TORRENT.name).stem
+            safe_stem = re.sub(r"[^\w\s.-]", "_", raw_stem)
+            safe_stem = re.sub(r"[\r\n\x00-\x1f\x7f]", "", safe_stem)
+            safe_fname = safe_stem + ".torrent"
+            self.send_response(200)
+            self.send_header("Content-Type", "application/x-bittorrent")
+            self.send_header("Content-Disposition", f'attachment; filename="{safe_fname}"')
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(body)
+        else:
+            self.send_response(404)
+            self.end_headers()
+
+    def _serve_comparison(self, filename: str):
+        # Only serve files that this script created as comparison screenshots.
+        for idx, p in enumerate(_COMPARISON_SS_PATHS):
+            if p.name == filename and p.exists():
+                ext  = p.suffix.lower()
+                ct   = "image/png" if ext == ".png" else "image/jpeg"
+                # Sanitize filename: remove path separators, control chars, and
+                # characters that are problematic in Content-Disposition headers or
+                # common filesystems (quotes, colons, wildcards, angle brackets, pipe)
+                raw_name   = p.name.replace("/", "_").replace("\\", "_")
+                safe_fname = re.sub(r'[\r\n\x00-\x1f\x7f:"*?<>|]', "_", raw_name)
+                if not safe_fname:
+                    safe_ext   = ".png" if ext == ".png" else ".jpg"
+                    safe_fname = f"comparison_{idx + 1:02d}{safe_ext}"
+                body = p.read_bytes()
+                self.send_response(200)
+                self.send_header("Content-Type", ct)
+                self.send_header(
+                    "Content-Disposition", f'attachment; filename="{safe_fname}"'
+                )
+                self.send_header("Content-Length", str(len(body)))
+                self.send_header("Cache-Control", "no-store")
+                self.end_headers()
+                self.wfile.write(body)
+                return
+        self.send_response(404)
+        self.end_headers()
+
+    def _serve_encoded(self, filename: str):
+        # Only serve files that this script created as encoded screenshots.
+        for idx, p in enumerate(_ENCODED_SS_PATHS):
+            if p.name == filename and p.exists():
+                ext  = p.suffix.lower()
+                ct   = "image/png" if ext == ".png" else "image/jpeg"
+                # Sanitize filename: remove path separators, control chars, and
+                # characters that are problematic in Content-Disposition headers or
+                # common filesystems (quotes, colons, wildcards, angle brackets, pipe)
+                raw_name   = p.name.replace("/", "_").replace("\\", "_")
+                safe_fname = re.sub(r'[\r\n\x00-\x1f\x7f:"*?<>|]', "_", raw_name)
+                if not safe_fname:
+                    safe_ext   = ".png" if ext == ".png" else ".jpg"
+                    safe_fname = f"encoded_{idx + 1:02d}{safe_ext}"
+                body = p.read_bytes()
+                self.send_response(200)
+                self.send_header("Content-Type", ct)
+                self.send_header(
+                    "Content-Disposition", f'attachment; filename="{safe_fname}"'
+                )
+                self.send_header("Content-Length", str(len(body)))
+                self.send_header("Cache-Control", "no-store")
+                self.end_headers()
+                self.wfile.write(body)
+                return
+        self.send_response(404)
+        self.end_headers()
+
+    def log_message(self, *_):
+        return
+
+
+def _kill_port(port: int) -> None:
+    import socket as _socket
+    try:
+        with _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM) as s:
+            s.settimeout(0.3)
+            if s.connect_ex(("127.0.0.1", port)) != 0:
+                return
+    except OSError:
+        return
+    if sys.platform == "linux":
+        try:
+            subprocess.run(
+                ["fuser", "-k", f"{port}/tcp"],
+                capture_output=True, check=False, timeout=5,
+            )
+            time.sleep(0.5)
+        except Exception:
+            pass
+
+
+def start_server(port: int) -> None:
+    global _HTTP_STARTED
+    with _HTTP_STARTED_LOCK:
+        if _HTTP_STARTED:
+            _SERVER_READY.set()
+            return
+        _HTTP_STARTED = True
+
+    _kill_port(port)
+
+    def _run():
+        global _HTTP_STARTED
+        for attempt in range(1, 4):
+            try:
+                httpd = _EncodeServer(("", port), _EncodeHandler)
+                log(f"Web UI -> http://localhost:{port}", "WEB", c.GREEN)
+                _SERVER_READY.set()
+                httpd.serve_forever()
+                return
+            except OSError:
+                if attempt < 3:
+                    time.sleep(0.5 * attempt)
+                    _kill_port(port)
+                else:
+                    error(f"Port {port} is busy.")
+                    _SERVER_READY.set()
+            except Exception as exc:
+                error(f"Server error: {exc}")
+                _SERVER_READY.set()
+                return
+        with _HTTP_STARTED_LOCK:
+            _HTTP_STARTED = False
+        _SERVER_READY.set()
+
+    threading.Thread(target=_run, daemon=True, name="encode-server").start()
+
+
+# ========================= CLEANUP ON EXIT =========================
+
+def _cleanup() -> None:
+    if not AUTO_DELETE_CREATED_FILES:
+        return
+    deleted: list[str] = []
+    for path in list(_GENERATED_FILES):
+        if path.exists():
+            try:
+                path.unlink()
+                deleted.append(path.name)
+            except OSError:
+                pass
+    if deleted:
+        print(
+            f"\n{c.YELLOW}Auto-deleted ({len(deleted)} file(s)): "
+            f"{', '.join(deleted)}{c.RESET}"
+        )
+
+
+atexit.register(_cleanup)
+
+
+# ========================= MAIN =========================
+
+def main() -> None:
+    global _WEBAPP_HTML, _COMPARISON_SS_PATHS, _UPLOADED_ENCODED_URLS, _ENCODED_SS_PATHS
+
+    parser = argparse.ArgumentParser(
+        description="Encode comparison & upload tool",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=(
+            "Flag mode:\n"
+            "  python encode.py -s source.mkv -c comparison.mkv -e encoded.mkv\n\n"
+            "Interactive mode (no flags):\n"
+            "  python encode.py\n"
+            "  → hierarchical file picker; enter Source,Encoded,Comparison keys\n"
+            "    e.g. '1,2A,3AA'"
+        ),
+    )
+    parser.add_argument("-s", "--source",     metavar="FILE",
+                        help="Source file (used for description & torrent)")
+    parser.add_argument("-c", "--comparison", metavar="FILE",
+                        help="Comparison source file (frames served locally)")
+    parser.add_argument("-e", "--encoded",    metavar="FILE",
+                        help="Encoded file (frames uploaded to image host)")
+    args = parser.parse_args()
+
+    if args.source or args.comparison or args.encoded:
+        source_path     = Path(args.source).resolve()     if args.source     else None
+        comparison_path = Path(args.comparison).resolve() if args.comparison else None
+        encoded_path    = Path(args.encoded).resolve()    if args.encoded    else None
+
+        for label, p in [
+            ("source",     source_path),
+            ("comparison", comparison_path),
+            ("encoded",    encoded_path),
+        ]:
+            if p is not None and not p.exists():
+                error(f"{label} file not found: {p}")
+                sys.exit(1)
+    else:
+        source_path, encoded_path, comparison_path = select_files_interactive()
+
+    if source_path is None:
+        error("Source file is required.")
+        sys.exit(1)
+
+    # If no comparison file was specified, fall back to the source file.
+    if comparison_path is None:
+        comparison_path = source_path
+
+    banner()
+    print(f"  {c.BOLD}{c.PURPLE}Source     → {source_path.name}{c.RESET}")
+    if encoded_path:
+        print(f"  {c.BOLD}{c.PURPLE}Encoded    → {encoded_path.name}{c.RESET}")
+    if comparison_path.resolve() == source_path.resolve():
+        print(f"  {c.BOLD}{c.PURPLE}Comparison → {comparison_path.name} (same as source){c.RESET}")
+    else:
+        print(f"  {c.BOLD}{c.PURPLE}Comparison → {comparison_path.name}{c.RESET}")
+    print()
+
+    main_file = encoded_path if encoded_path else source_path
+    work_dir  = main_file.parent
+
+    _main_label = "encoded file" if encoded_path else "source file"
+    log(f"Getting MediaInfo for {_main_label}...", "INFO")
+    mediainfo_text = get_mediainfo_text(main_file)
+    mediainfo_text = trim_mediainfo_path(mediainfo_text, work_dir)
+
+    _torrent_ok = [False]
+
+    def _torrent_worker():
+        _torrent_ok[0] = create_torrent(main_file)
+
+    torrent_thread = threading.Thread(
+        target=_torrent_worker, daemon=True, name="torrent"
+    )
+    torrent_thread.start()
+
+    comp_ss: list[Path] = []
+    enc_ss:  list[Path] = []
+
+    # Determine shared frame numbers from the encoded file so both the encoded
+    # and comparison screenshots are extracted at identical frame positions.
+    frame_numbers: list[int] = []
+    if encoded_path:
+        total_frames = get_frame_count(encoded_path)
+        if total_frames > 0:
+            frame_numbers = [
+                min(int(total_frames * pct), total_frames - 1)
+                for pct in FRAME_PERCENTS
+            ]
+            log(
+                f"Shared frame numbers: {frame_numbers} "
+                f"(from {total_frames} total frames in encoded file)",
+                "INFO",
+            )
+        else:
+            error("Could not determine frame count for encoded file; "
+                  "falling back to timestamp-based extraction.")
+
+    def _comp_worker():
+        nonlocal comp_ss
+        prefix = comparison_path.stem
+        if frame_numbers:
+            comp_ss = take_frames_at_numbers(
+                comparison_path, frame_numbers, prefix, label="comparison frames"
+            )
+        else:
+            comp_ss = take_frames(comparison_path, prefix, label="comparison frames")
+
+    def _enc_worker():
+        nonlocal enc_ss
+        prefix = encoded_path.stem
+        if frame_numbers:
+            enc_ss = take_frames_at_numbers(
+                encoded_path, frame_numbers, prefix, label="encoded frames"
+            )
+        else:
+            enc_ss = take_frames(encoded_path, prefix, label="encoded frames")
+
+    threads: list[threading.Thread] = []
+    if comparison_path:
+        t = threading.Thread(target=_comp_worker, daemon=True, name="comp-ss")
+        threads.append(t)
+        t.start()
+    if encoded_path:
+        t = threading.Thread(target=_enc_worker, daemon=True, name="enc-ss")
+        threads.append(t)
+        t.start()
+
+    for t in threads:
+        t.join()
+
+    _COMPARISON_SS_PATHS = list(comp_ss)
+    _ENCODED_SS_PATHS    = list(enc_ss)
+
+    encoded_urls: list[str] = []
+    if enc_ss:
+        encoded_urls = upload_images_concurrent(enc_ss)
+    _UPLOADED_ENCODED_URLS = encoded_urls
+
+    log("Generating description...", "DESC")
+    description = generate_description(
+        source_path,
+        comparison_path,
+        encoded_path,
+        mediainfo_text,
+        encoded_urls,
+    )
+
+    if not SKIP_TXT:
+        txt_path = work_dir / f"{main_file.stem}_encode_description.txt"
+        if not txt_path.exists():
+            txt_path.write_text(description, encoding="utf-8")
+            _GENERATED_FILES.append(txt_path)
+            success(f"Saved description → {txt_path.name}")
+
+    copy_to_clipboard(description)
+
+    title_str = main_file.stem
+
+    torrent_thread.join()
+    if not _torrent_ok[0] and CREATE_TORRENT_FILE:
+        error("Torrent creation failed!")
+
+    torrent_filename = (
+        _GENERATED_TORRENT.name if _GENERATED_TORRENT else f"{main_file.name}.torrent"
+    )
+
+    _WEBAPP_HTML = _build_html(
+        description          = description,
+        title_str            = title_str,
+        torrent_filename     = torrent_filename,
+        encoded_filenames    = [p.name for p in enc_ss],
+        comparison_filenames = [p.name for p in comp_ss],
+    )
+
+    if START_HTTP_SERVER:
+        start_server(HTTP_PORT)
+        _SERVER_READY.wait(timeout=5)
+
+    print(f"\n{c.BOLD}{c.GREEN}ALL DONE!{c.RESET}")
+    if START_HTTP_SERVER:
+        print(
+            f"{c.DIM}Web UI → http://localhost:{HTTP_PORT}  "
+            f"(open in browser){c.RESET}"
+        )
+    print(f"{c.DIM}Generated files will be deleted on exit.{c.RESET}")
+    try:
+        input(f"\nPress {c.BOLD}Enter{c.RESET} to exit...")
+    except EOFError:
+        # Non-interactive stdin (e.g. piped) – keep the server alive until Ctrl-C.
+        log("Non-interactive mode detected. Press Ctrl-C to stop the server.", "INFO", c.YELLOW)
+        try:
+            while True:
+                time.sleep(1)
+        except KeyboardInterrupt:
+            pass
+    sys.exit(0)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except KeyboardInterrupt:
+        print(f"\n\n{c.YELLOW}Cancelled.{c.RESET}")
