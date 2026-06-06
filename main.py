@@ -529,7 +529,7 @@ class WebAppHandler(BaseHTTPRequestHandler):
 
         if route in ('/', '/index.html'):
             self._serve_html()
-        elif route == '/api/data':
+        elif route in ('/api/data', '/latest.json'):
             self._serve_data()
         elif route == '/api/torrent':
             self._serve_torrent()
